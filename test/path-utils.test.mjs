@@ -1,7 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { extractAssignmentId, extractSubmissionId, normalizeWhitespace, resolveSubmissionReference, stripLeadingCourseShort } from "../playwright/core.mjs";
+import {
+  extractAssignmentId,
+  extractSubmissionId,
+  formatChromiumLaunchError,
+  isMissingBrowserExecutableError,
+  normalizeWhitespace,
+  resolveSubmissionReference,
+  stripLeadingCourseShort,
+} from "../playwright/core.mjs";
 import { resolveUploadPath } from "../src/path-utils.mjs";
 
 test("resolveUploadPath uses the current directory as the prefix for relative files", () => {
@@ -27,4 +35,19 @@ test("extractAssignmentId and extractSubmissionId parse nested Gradescope URLs",
 test("normalizeWhitespace and stripLeadingCourseShort keep course labels readable", () => {
   assert.equal(normalizeWhitespace("  CS101   Intro \n to Testing "), "CS101 Intro to Testing");
   assert.equal(stripLeadingCourseShort("CS101 | Intro to Testing", "CS101"), "Intro to Testing");
+});
+
+test("isMissingBrowserExecutableError detects Playwright missing-browser failures", () => {
+  const error = new Error("browserType.launch: Executable doesn't exist at /tmp/chrome");
+  assert.equal(isMissingBrowserExecutableError(error), true);
+  assert.equal(isMissingBrowserExecutableError(new Error("browserType.launch: Target page closed")), false);
+});
+
+test("formatChromiumLaunchError only suggests install steps for missing-browser failures", () => {
+  const missing = new Error("browserType.launch: Executable doesn't exist at /tmp/chrome");
+  const crash = new Error("browserType.launch: Target page, context or browser has been closed");
+
+  assert.match(formatChromiumLaunchError(missing), /browser executable is missing/i);
+  assert.match(formatChromiumLaunchError(missing), /playwright install chromium/);
+  assert.doesNotMatch(formatChromiumLaunchError(crash), /playwright install chromium/);
 });

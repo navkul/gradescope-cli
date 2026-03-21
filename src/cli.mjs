@@ -178,7 +178,15 @@ function formatAssignment(assignment) {
 
 function parseArgs(argv) {
   const args = [...argv];
-  const command = args[0] && !args[0].startsWith("--") ? args.shift() : "";
+  let command = "";
+  if (args[0]) {
+    if (isHelpToken(args[0])) {
+      command = "help";
+      args.shift();
+    } else if (!args[0].startsWith("-")) {
+      command = args.shift();
+    }
+  }
   const options = {};
   const positionals = [];
 
@@ -208,12 +216,20 @@ function parseArgs(argv) {
   return { command, options, positionals };
 }
 
+export function parseCliArgs(argv) {
+  return parseArgs(argv);
+}
+
 function firstPositional(parsed, index) {
   return String(parsed.positionals[index] || "").trim();
 }
 
 function toCamelCase(value) {
   return value.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+}
+
+function isHelpToken(value) {
+  return value === "--help" || value === "-h";
 }
 
 function printHelp() {

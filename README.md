@@ -20,7 +20,7 @@ The package installs Playwright and runs a postinstall step that downloads Chrom
 
 Do not use `npm install -g gradescope-cli`. That package name is already taken on npm by an unrelated abandoned package from 2019 that pulls in deprecated dependencies such as `request` and `zlib`, which is why installs fail with `node-waf: command not found`.
 
-As of March 21, 2026, `gradescope-playwright-cli` is the corrected package name for this repo, but it has not been published yet. Until it is published, install from a local clone or tarball.
+As of March 21, 2026, `gradescope-playwright-cli` is the published package name for this repo.
 
 ### From a local clone
 

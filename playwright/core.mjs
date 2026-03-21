@@ -1,11 +1,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { DEFAULT_BASE_URL } from "../src/config.mjs";
 
 const COURSE_SHORT_SELECTOR = ".courseBox--shortname, .courseBox__shortname, .courseShortname";
 const COURSE_NAME_SELECTOR = ".courseBox--name, .courseBox__name, .courseName, .course-name";
 const DEFAULT_TIMEOUT_MS = 45000;
 let playwrightModulePromise;
+const require = createRequire(import.meta.url);
 
 export async function login(options) {
   return runWithBrowser(options, async ({ browser, baseUrl, sessionFile, timeoutMs }) => {
@@ -360,8 +363,11 @@ async function runWithBrowser(options, callback) {
   try {
     browser = await launchChromium(headless);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`could not launch Chromium. Run \`playwright install chromium\` if the browser is missing. ${message}`);
+    const recovered = await tryInstallChromiumAndRelaunch(error, headless);
+    if (!recovered) {
+      throw new Error(formatChromiumLaunchError(error));
+    }
+    browser = recovered;
   }
 
   try {
@@ -644,4 +650,42 @@ async function launchChromium(headless) {
   }
   const { chromium } = await playwrightModulePromise;
   return chromium.launch({ headless });
+}
+
+async function tryInstallChromiumAndRelaunch(error, headless) {
+  if (!isMissingBrowserExecutableError(error)) {
+    return null;
+  }
+
+  installChromiumBrowser();
+  return launchChromium(headless);
+}
+
+function installChromiumBrowser() {
+  const packagePath = require.resolve("playwright/package.json");
+  const cliPath = path.join(path.dirname(packagePath), "cli.js");
+  const result = spawnSync(process.execPath, [cliPath, "install", "chromium"], {
+    env: {
+      ...process.env,
+      PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH || "0",
+    },
+    stdio: "inherit",
+  });
+
+  if (result.status !== 0) {
+    throw new Error("Playwright browser install failed");
+  }
+}
+
+export function isMissingBrowserExecutableError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("Executable doesn't exist");
+}
+
+export function formatChromiumLaunchError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (isMissingBrowserExecutableError(error)) {
+    return `could not launch Chromium because the browser executable is missing. Run \`playwright install chromium\` if the automatic install retry fails. ${message}`;
+  }
+  return `could not launch Chromium. ${message}`;
 }
