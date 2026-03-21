@@ -3,6 +3,16 @@
 .gradescope/
 debug/
 dist/
+node_modules/
+.DS_Store
 bin/
 /gradescope-cli
 coverage.out
+
+
+
+AGENTS.md
+ARCHITECTURE.md
+FINDINGS.md
+PROMPT.md
+PROGRESS.md

@@ -1,0 +1,27 @@
+{
+  "name": "gradescope-cli",
+  "version": "0.2.0",
+  "description": "A Playwright-first Gradescope CLI for login, browsing courses, and submitting files.",
+  "type": "module",
+  "bin": {
+    "gradescope-cli": "./bin/gradescope-cli.mjs"
+  },
+  "files": [
+    "bin",
+    "playwright",
+    "scripts",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node ./scripts/postinstall.mjs",
+    "test": "node --test",
+    "check": "node --check ./bin/gradescope-cli.mjs && node --check ./src/cli.mjs && node --check ./playwright/core.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright": "1.58.2"
+  }
+}

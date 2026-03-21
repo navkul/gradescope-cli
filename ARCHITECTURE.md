@@ -1,58 +1,126 @@
 # ARCHITECTURE.md
 
-## Problem statement
-- Build a usable Gradescope CLI without an official public API, while keeping Go as the primary implementation language and preserving a path to adapt if private web behavior shifts.
+## Direction
+- The repository is shifting to a Playwright-first architecture for the user-facing CLI.
+- The primary public distribution target is now npm, not the Go binary.
+- The earlier Go code remains in the repo, but it is no longer the primary documented runtime path.
 
-## Chosen architecture
-- Go-first CLI with a cookie-backed HTTP client and HTML parsing.
-- The CLI discovers courses, assignments, and the submission form by reading the live authenticated HTML instead of relying on guessed private API endpoints.
+## Primary architecture
+- `bin/gradescope-cli.mjs`
+  - npm-exposed executable entrypoint
+- `src/cli.mjs`
+  - command parsing
+  - interactive flow orchestration
+  - output formatting
+- `src/config.mjs`
+  - config and session paths
+- `src/credentials.mjs`
+  - env/file/interactive credential loading
+- `src/path-utils.mjs`
+  - current-directory-relative file resolution for uploads
+- `src/ui.mjs`
+  - prompts and CLI output helpers
+- `playwright/core.mjs`
+  - all browser-backed Gradescope interactions
+- `scripts/postinstall.mjs`
+  - automatic Chromium installation during npm install
 
-## Why this architecture won
-- Public reconnaissance showed a standard Rails login form and session cookie, which makes browser automation unnecessary for the first working implementation.
-- A direct Go client keeps the shipping path smaller, faster, and easier to distribute than a Go-plus-Playwright bundle.
-- Parsing live forms reduces brittleness compared with hardcoding hidden field names or submission endpoints.
+## Why Playwright is now the primary path
+- The user asked to simplify the implementation by using Playwright for all commands.
+- Gradescope has no official public API for this workflow.
+- Browser automation gives a single consistent execution model for:
+  - login
+  - session reuse
+  - class listing
+  - assignment listing
+  - submit
+  - result parsing
+- This removes the split-brain design where some commands used HTTP parsing and only submit used Playwright.
 
-## Role of Go
-- All shipped implementation is in Go: CLI orchestration, credential loading, HTTP session handling, HTML parsing, interactive selection, submission, result scraping, and session persistence.
+## Packaging strategy
+- npm is the primary shipping format.
+- Supported install flows:
+  - published package: `npm install -g gradescope-cli`
+  - repo clone: `npm install && npm link`
+- The package installs Chromium automatically during `postinstall`.
+- The installer sets `PLAYWRIGHT_BROWSERS_PATH=0` so Playwright stores browsers inside the package-local browser directory.
+- That avoids depending on a separate manual browser install step and helps keep the npm install self-contained.
 
-## Role of Playwright and/or HTTP client
-- Current implementation uses only the Go HTTP client.
-- Playwright remains a fallback path if a real authenticated account reveals anti-bot friction or dynamic pages that cannot be parsed reliably server-side.
-
-## Component boundaries
-- `cmd/gradescope-cli`: process entrypoint.
-- `internal/cli`: subcommands, interactive prompts, output rendering.
-- `internal/credentials`: credentials loading from flags, env vars, password files, or simple local credentials files.
-- `internal/session`: cookie jar creation and session persistence to disk.
-- `internal/gradescope`: Gradescope-specific login, course/assignment parsing, submission, and result scraping.
-- `internal/config`: default paths and app-level constants.
-
-## CLI UX flow
-- `gradescope-cli login --credentials-file creds.json`
-- `gradescope-cli classes`
-- `gradescope-cli assignments --course <id>`
-- `gradescope-cli submit --assignment <id> --file <path>`
-- `gradescope-cli result --submission <id>`
-- `gradescope-cli` or `gradescope-cli wizard` runs a guided flow using an existing session or supplied credentials.
+## Session model
+- The CLI stores a Playwright `storageState` JSON file at the config directory.
+- Commands reuse that saved state when opening new browser contexts.
+- The session path is overrideable with `--session-file`.
+- The config root is overrideable with `GRADESCOPE_CONFIG_DIR`.
 
 ## Data flow
-- Credentials are loaded from flags, environment variables, password files, or a local credentials file.
-- Login loads `/login`, parses the live form, posts credentials, and stores the resulting cookie jar to a session file.
-- Course and assignment listing fetch authenticated HTML pages and extract links heuristically.
-- Submission fetches the assignment page, discovers the upload form, performs the multipart POST, follows redirects, and parses the resulting submission page.
 
-## Error handling
-- Authentication failures return the inline flash message when present.
-- Missing session or expired session returns a clear error and the wizard can re-login when credentials are available.
-- Parser misses write debug HTML snapshots to the local config debug directory for fast follow-up inspection.
-- Missing response or missing autograder content is treated as an expected state, not a crash.
+### `login`
+- launch Chromium
+- open `/login`
+- submit the real Gradescope login form
+- verify the browser is authenticated
+- save `storageState` to the session file
+
+### `classes`
+- load the saved Playwright session state
+- open `/account`
+- extract course links and labels from the real page
+
+### `assignments`
+- load the saved Playwright session state
+- if no course is provided, prompt the user to choose one
+- open `/courses/<course-id>`
+- parse assignment rows from `#assignments-student-table`
+
+### `submit <file>`
+- resolve the file path relative to the current working directory
+- load or create an authenticated browser session
+- if no course is provided, prompt for a class
+- if no assignment is provided, prompt for an assignment
+- open the assignment flow in the live UI
+- attach the local file through the browser
+- finalize upload if the flow includes `/select_pages`
+- parse and print the resulting submission page
+
+### `result`
+- open the provided submission reference in an authenticated browser context
+- prefer React-backed result data when present
+- fall back to visible response/autograder sections
+
+## CLI UX model
+- Keep the common path minimal:
+  - `gradescope-cli submit <file>`
+- Interactive selection is built in instead of forcing IDs up front.
+- Explicit identifiers are still supported when the caller wants scripting or repeatability:
+  - `--course <course-id>`
+  - `--assignment <assignment-id-or-title>`
+
+## Error handling model
+- Missing session:
+  - explain that the user should run `gradescope-cli login`
+- Missing credentials during login:
+  - prompt interactively when possible
+- Missing browser runtime:
+  - surface an actionable Playwright install error
+- Missing class or assignment:
+  - fail with a direct lookup error
+- Missing submission page:
+  - fail instead of pretending the result parsed successfully
 
 ## Testing strategy
-- Unit tests cover HTML parsing helpers for courses, assignments, submission form discovery, and result parsing.
-- `go test ./...` is the baseline automated check.
-- End-to-end validation requires a real Gradescope account supplied locally through env vars or a credentials file; the code is wired for that path but not yet executed in this run.
+- Fast unit tests cover:
+  - path resolution
+  - submission reference normalization
+  - assignment/submission ID extraction
+  - whitespace and course-label normalization
+- Browser-backed parser tests exist for:
+  - course extraction
+  - assignment extraction
+  - submission result extraction
+- In this Codex sandbox those browser-backed tests are skipped because Chromium cannot launch even after download.
+- The legacy Go tests still run and remain useful regression coverage for the older parser code that is still in the repo.
 
-## Future improvements
-- Tighten parsers against real authenticated HTML samples once credentials are available.
-- Add richer result parsing for structured autograder output once real pages are captured.
-- Add optional browser-backed fallback only if authenticated validation proves it necessary.
+## Current limits
+- The new npm CLI has not yet been live-validated against a real Gradescope account in this sandbox because browser launch is blocked here.
+- The public CLI path is implemented and packaged, but real browser-capable validation still must happen on a normal local machine.
+- The repo still contains older Go code and older Playwright helper code; the architecture has shifted, but the cleanup is not yet a full removal pass.

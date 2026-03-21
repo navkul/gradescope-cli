@@ -25,14 +25,30 @@ func TestExtractCourses(t *testing.T) {
 	if courses[0].ID != "123" || courses[0].Short != "CS101" {
 		t.Fatalf("unexpected first course: %+v", courses[0])
 	}
+	if courses[0].Name != "Intro to Testing" {
+		t.Fatalf("unexpected first course name: %+v", courses[0])
+	}
 }
 
 func TestExtractAssignments(t *testing.T) {
 	doc := mustDoc(t, `
 		<html><body>
-		  <a href="/courses/123/assignments/789">Homework 1</a>
-		  <a href="/assignments/790">Homework 2</a>
-		  <a href="/courses/123/assignments/789/submissions">Ignore me</a>
+		  <table id="assignments-student-table">
+		    <tbody>
+		      <tr>
+		        <th scope="row"><a href="/courses/123/assignments/789/submissions/456">Homework 1</a></th>
+		        <td class="submissionStatus"><div class="submissionStatus--score">10 / 10</div></td>
+		      </tr>
+		      <tr>
+		        <th scope="row"><a href="/courses/123/assignments/790/submissions/457">Homework 2</a></th>
+		        <td class="submissionStatus"><div class="submissionStatus--text">Submitted</div></td>
+		      </tr>
+		      <tr>
+		        <th scope="row">Homework 3</th>
+		        <td class="submissionStatus"><div class="submissionStatus--text">No Submission</div></td>
+		      </tr>
+		    </tbody>
+		  </table>
 		</body></html>
 	`)
 
@@ -42,6 +58,9 @@ func TestExtractAssignments(t *testing.T) {
 	}
 	if assignments[0].ID != "789" || assignments[0].Title != "Homework 1" {
 		t.Fatalf("unexpected first assignment: %+v", assignments[0])
+	}
+	if assignments[0].Status != "10 / 10" {
+		t.Fatalf("unexpected first assignment status: %+v", assignments[0])
 	}
 }
 
@@ -74,9 +93,7 @@ func TestParseUploadForm(t *testing.T) {
 func TestExtractSubmissionResult(t *testing.T) {
 	doc := mustDoc(t, `
 		<html><body>
-		  <div class="alert-success">Submission received</div>
-		  <h2>Autograder Output</h2>
-		  <div>Passed 4/5 tests</div>
+		  <div data-react-class="AssignmentSubmissionViewer" data-react-props='{"assignment_submission":{"id":321,"status":"processed"},"paths":{"submission_path":"/courses/1/assignments/2/submissions/321"}}'></div>
 		</body></html>
 	`)
 
@@ -84,11 +101,39 @@ func TestExtractSubmissionResult(t *testing.T) {
 	if result.SubmissionID != "321" {
 		t.Fatalf("unexpected submission id: %s", result.SubmissionID)
 	}
-	if !strings.Contains(result.Status, "Submission received") {
+	if result.Status != "processed" {
 		t.Fatalf("unexpected status: %s", result.Status)
 	}
-	if !result.HasAutograder || !strings.Contains(result.AutograderMessage, "Passed 4/5 tests") {
-		t.Fatalf("unexpected autograder message: %+v", result)
+	if result.URL != "https://www.gradescope.com/courses/1/assignments/2/submissions/321" {
+		t.Fatalf("unexpected submission url: %+v", result)
+	}
+}
+
+func TestExtractSubmissionResultWithoutVisibleResponse(t *testing.T) {
+	doc := mustDoc(t, `
+		<html><body>
+		  <div class="alert-success">Submission received</div>
+		  <h2>Response</h2>
+		  <h2>Autograder Output</h2>
+		  <div>Queued for grading</div>
+		</body></html>
+	`)
+
+	result := extractSubmissionResult(doc, "https://www.gradescope.com/submissions/654")
+	if result.Response != "" {
+		t.Fatalf("expected empty response, got %q", result.Response)
+	}
+	if !result.HasAutograder || result.AutograderMessage != "Queued for grading" {
+		t.Fatalf("unexpected autograder parsing: %+v", result)
+	}
+}
+
+func TestResolveSubmissionReference(t *testing.T) {
+	if got := resolveSubmissionReference("123"); got != "/submissions/123" {
+		t.Fatalf("unexpected bare submission reference: %s", got)
+	}
+	if got := resolveSubmissionReference("/courses/1/assignments/2/submissions/123"); got != "/courses/1/assignments/2/submissions/123" {
+		t.Fatalf("unexpected path submission reference: %s", got)
 	}
 }
 

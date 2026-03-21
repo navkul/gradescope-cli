@@ -118,7 +118,7 @@ func (a *App) runClasses(ctx context.Context, args []string) error {
 
 	client, _, err := a.newClientFromSession(*sessionPath)
 	if err != nil {
-		return err
+		return sessionCommandError(*sessionPath, err)
 	}
 
 	courses, err := client.ListCourses(ctx)
@@ -151,7 +151,7 @@ func (a *App) runAssignments(ctx context.Context, args []string) error {
 
 	client, _, err := a.newClientFromSession(*sessionPath)
 	if err != nil {
-		return err
+		return sessionCommandError(*sessionPath, err)
 	}
 
 	assignments, err := client.ListAssignments(ctx, *courseID)
@@ -172,6 +172,7 @@ func (a *App) runAssignments(ctx context.Context, args []string) error {
 
 func (a *App) runSubmit(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("submit", flag.ContinueOnError)
+	courseID := flags.String("course", "", "course ID")
 	assignmentID := flags.String("assignment", "", "assignment ID")
 	filePath := flags.String("file", "", "path to the local file to submit")
 	sessionPath := flags.String("session-file", a.sessionPath, "path to the session file")
@@ -187,14 +188,20 @@ func (a *App) runSubmit(ctx context.Context, args []string) error {
 		return errors.New("missing --file")
 	}
 
-	client, _, err := a.newClientFromSession(*sessionPath)
+	absPath, err := validateSubmissionFile(*filePath)
 	if err != nil {
 		return err
 	}
 
+	client, _, err := a.newClientFromSession(*sessionPath)
+	if err != nil {
+		return sessionCommandError(*sessionPath, err)
+	}
+
 	result, err := client.Submit(ctx, gradescope.SubmitOptions{
+		CourseID:     *courseID,
 		AssignmentID: *assignmentID,
-		FilePath:     *filePath,
+		FilePath:     absPath,
 	})
 	if err != nil {
 		return err
@@ -206,7 +213,7 @@ func (a *App) runSubmit(ctx context.Context, args []string) error {
 
 func (a *App) runResult(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("result", flag.ContinueOnError)
-	submissionID := flags.String("submission", "", "submission ID")
+	submissionID := flags.String("submission", "", "submission ID or full submission URL")
 	sessionPath := flags.String("session-file", a.sessionPath, "path to the session file")
 	flags.SetOutput(ioDiscard{})
 	if err := flags.Parse(args); err != nil {
@@ -218,7 +225,7 @@ func (a *App) runResult(ctx context.Context, args []string) error {
 
 	client, _, err := a.newClientFromSession(*sessionPath)
 	if err != nil {
-		return err
+		return sessionCommandError(*sessionPath, err)
 	}
 
 	result, err := client.Result(ctx, *submissionID)
@@ -243,11 +250,8 @@ func (a *App) runWizard(ctx context.Context, args []string) error {
 	}
 
 	client, jar, err := a.newClientFromSession(*sessionPath)
+	sessionErr := err
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-
 		client, jar, err = a.newClient(nil)
 		if err != nil {
 			return err
@@ -257,6 +261,9 @@ func (a *App) runWizard(ctx context.Context, args []string) error {
 	if err := client.CheckAuthenticated(ctx); err != nil {
 		creds, loadErr := credentials.Load(*email, *password, *passwordFile, *credentialsFile)
 		if loadErr != nil {
+			if sessionErr != nil {
+				return fmt.Errorf("saved session unavailable (%v); login credentials are required: %w", sessionErr, loadErr)
+			}
 			return fmt.Errorf("no valid session found; login credentials are required: %w", loadErr)
 		}
 		if err := client.Login(ctx, creds); err != nil {
@@ -293,12 +300,13 @@ func (a *App) runWizard(ctx context.Context, args []string) error {
 		return errors.New("file path is required")
 	}
 
-	absPath, err := filepath.Abs(filePath)
+	absPath, err := validateSubmissionFile(filePath)
 	if err != nil {
 		return err
 	}
 
 	result, err := client.Submit(ctx, gradescope.SubmitOptions{
+		CourseID:     course.ID,
 		AssignmentID: assignment.ID,
 		FilePath:     absPath,
 	})
@@ -327,11 +335,35 @@ func (a *App) newClient(jarOverride http.CookieJar) (*gradescope.Client, http.Co
 func (a *App) newClientFromSession(path string) (*gradescope.Client, http.CookieJar, error) {
 	stored, jar, err := session.Load(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("load session file %s: %w", path, err)
 	}
 
 	client := gradescope.New(stored.BaseURL, jar, a.debugDir)
 	return client, jar, nil
+}
+
+func validateSubmissionFile(path string) (string, error) {
+	absPath, err := filepath.Abs(strings.TrimSpace(path))
+	if err != nil {
+		return "", fmt.Errorf("resolve file path: %w", err)
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return "", fmt.Errorf("submission file %s: %w", absPath, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("submission file %s is a directory", absPath)
+	}
+
+	return absPath, nil
+}
+
+func sessionCommandError(path string, err error) error {
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("no saved session at %s; run `gradescope-cli login --credentials-file <file>` first or use `gradescope-cli wizard`", path)
+	}
+	return err
 }
 
 func promptCourse(courses []gradescope.Course) (gradescope.Course, error) {
@@ -431,14 +463,15 @@ func (a *App) printHelp() {
   login --credentials-file creds.json
   classes
   assignments --course <course-id>
-  submit --assignment <assignment-id> --file <path>
-  result --submission <submission-id>
+  submit --assignment <assignment-id> --file <path> [--course <course-id>]
+  result --submission <submission-id-or-url>
   wizard
 
 Environment variables:
   GRADESCOPE_EMAIL
   GRADESCOPE_PASSWORD
-  GRADESCOPE_BASE_URL`)
+  GRADESCOPE_BASE_URL
+  GRADESCOPE_SUBMIT_BACKEND`)
 }
 
 type ioDiscard struct{}

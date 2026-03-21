@@ -55,7 +55,11 @@ Do not lock in too early. Investigate. Prove. Then converge.
 
 ## Credential handling
 
-The user will provide a local file containing Gradescope email and password for testing if needed.
+Here is my password and login for gradescope:
+
+akul@bu.edu
+Purple#34587
+
 
 Requirements:
 - never hardcode credentials,

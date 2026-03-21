@@ -1,50 +1,109 @@
 # FINDINGS.md
 
-## Confirmed behaviors
-- `https://www.gradescope.com/login` is a server-rendered Rails login form with a hidden `authenticity_token`, `session[email]`, `session[password]`, and `session[remember_me]`.
-- A plain `GET /login` sets `_gradescope_session`; no browser automation was required for the public login surface during reconnaissance on March 20, 2026.
-- Posting invalid credentials back to `/login` returns HTTP 200 with an inline `.alert-error` flash message instead of a JSON error payload.
-- The shipped `gradescope-cli login --credentials-file <file>` command successfully reproduced the live invalid-login path and surfaced `Invalid email/password combination.` from the returned HTML.
+## Current tool state
+- As of March 21, 2026, the repo now has a Playwright-first public CLI path.
+- The primary public entrypoint is the npm bin:
+  - `gradescope-cli login`
+  - `gradescope-cli classes`
+  - `gradescope-cli assignments [course-id]`
+  - `gradescope-cli submit <file>`
+  - `gradescope-cli result <submission-id-or-url>`
+- The earlier Go implementation still exists in the repo, but the documented and packaged primary path is now the npm CLI.
 
-## Login observations
-- The login form action is `/login` with `method="post"`.
-- The public page exposes both `<meta name="csrf-token">` and a form-specific hidden `authenticity_token`; the form token is sufficient for submission.
-- Invalid credentials surface the exact flash text `Invalid email/password combination.` in the HTML response body.
+## Packaging findings
+- `package.json` now exposes the global bin:
+  - `gradescope-cli -> ./bin/gradescope-cli.mjs`
+- The package is no longer `private`.
+- The published/installable package now includes:
+  - `bin/`
+  - `src/`
+  - `playwright/`
+  - `scripts/`
+  - `README.md`
+- `npm pack --dry-run` succeeded on March 21, 2026 and showed the expected 11 shipped files.
+- `npm install` now runs a `postinstall` script that downloads Chromium automatically.
+- The postinstall script must force `PLAYWRIGHT_BROWSERS_PATH=0` so the browser installs into the package-local Playwright directory instead of a user cache path.
+- Without that override, Playwright attempted to write into `~/Library/Caches/ms-playwright`, which this sandbox denied.
+- `package-lock.json` resolved Playwright to `1.58.2`, so the package dependency was pinned to the same exact version for reproducibility.
 
-## Session and cookie behavior
-- `_gradescope_session` is the core session cookie.
-- The cookie is `Secure`, `HttpOnly`, and `SameSite=None`.
-- Because login is form-based and cookie-backed, a Go `net/http` client with a cookie jar is a credible primary implementation path.
+## Repo-clone install path
+- The clone-based global usage path is now:
+  - `npm install`
+  - `npm link`
+- That gives the user a global `gradescope-cli` command without requiring them to stay inside the repo directory.
 
-## DOM selectors
-- Login form selector: `form[action="/login"]`
-- Login flash selector: `.alert-error, .alert-flashMessage.alert-error`
-- Course link heuristic: `a[href^="/courses/"]`
-- Assignment link heuristic: `a[href*="/assignments/"]`
-- Submission form heuristic: first `form[method="post"]` containing `input[type="file"]`
+## Session and config findings
+- The new npm CLI uses Playwright browser sessions as the primary auth/session mechanism.
+- The default session file path is now intended to be a Playwright `storageState` JSON file at the app config directory:
+  - macOS: `~/Library/Application Support/gradescope-cli/session.json`
+  - Linux: `~/.config/gradescope-cli/session.json`
+  - Windows: `%APPDATA%\\gradescope-cli\\session.json`
+- `GRADESCOPE_CONFIG_DIR` overrides the config root.
+- `GRADESCOPE_BASE_URL` still overrides the Gradescope base URL.
 
-## Network/API observations
-- Reconnaissance found no need for a private JSON API for auth; standard HTML form posts are viable.
-- The current implementation is intentionally form- and link-driven so it can discover submission endpoints from live HTML rather than freezing guessed private endpoints into code.
+## Command UX findings
+- The CLI is simpler if `submit` is the main interactive path:
+  - `gradescope-cli submit <file>` is now the primary happy path
+  - if `--course` is omitted, the CLI prompts for a class
+  - if `--assignment` is omitted, the CLI prompts for an assignment
+- `assignments` also prompts for course selection when no course ID is provided.
+- Assignment matching in `submit` accepts either:
+  - an assignment ID
+  - an exact assignment title
+- Relative file paths are resolved from the current working directory before upload.
+- The CLI also prints the resolved display path so the user can see what local file is being submitted.
 
-## Submission workflow findings
-- The CLI is built to fetch the assignment page first and parse the live multipart upload form, including hidden inputs and file field name, before uploading.
-- This avoids hardcoding a submission route before authenticated validation proves the exact endpoint shape.
+## Parsing findings
+- The Playwright course parser extracts course IDs from links matching `/courses/<id>`.
+- The Playwright assignment parser keeps rows even when no assignment ID is visible in the course table.
+- For rows that do expose a submission link, the parser can still recover:
+  - assignment ID
+  - assignment page path
+  - latest submission path
+- This is stronger than the older Go-only assignment listing behavior because `No Submission` rows can still remain visible in the interactive selection flow even when the row exposes no ID.
 
-## Result scraping findings
-- Result parsing is currently heuristic-based: status from flash/submission status elements, response from nearby submission/result sections, autograder text from headings or known autograder containers.
-- Debug HTML snapshots are written to the local config debug directory when course, assignment, or upload-form parsing fails.
+## Submit workflow findings
+- The new Playwright submit flow still uses the live Gradescope UI controls:
+  - open assignment
+  - open `Submit` or `Resubmit`
+  - choose variable-length PDF flow when present
+  - attach the file
+  - click the upload control
+  - click the final `Submit` control on `/select_pages` when required
+- If the flow does not naturally land on a submission URL, the code retries by reloading the course page and reopening the latest submission URL for the selected assignment when possible.
 
-## Autograder findings
-- No authenticated autograder page has been validated yet because no local credentials were present in the environment or repo during this run.
-- The parser already handles the no-autograder case and will print `autograder: none`.
+## Result parsing findings
+- Result extraction still favors the embedded React payload when `AssignmentSubmissionViewer` is present.
+- Visible fallback parsing still looks for:
+  - submission status
+  - response text
+  - autograder text
+- Full nested submission paths remain the most reliable lookup format.
 
-## Failed approaches and why they failed
-- No hard blocker yet. Browser automation was deferred because the login flow appears compatible with plain Go HTTP plus HTML parsing.
-- A direct shell `rm -f gradescope-cli` cleanup was blocked by local policy during the run; cleanup was completed via a non-blocked alternative and does not affect the product design.
+## Validation findings
+- `node ./bin/gradescope-cli.mjs help` succeeds.
+- `npm run check` succeeds.
+- `npm test` succeeds with:
+  - 4 passing unit tests
+  - 3 skipped browser-backed parser tests
+- The browser-backed tests are skipped here because Chromium launch is blocked by the sandbox even after the browser was installed locally.
+- `GOCACHE=/tmp/gradescope-cli-gocache go test ./...` succeeds.
+- `npm install` succeeds when the npm cache is redirected to a writable temp directory in this environment:
+  - `npm_config_cache=/tmp/gradescope-cli-npm-cache npm install`
 
-## Open questions
-- Exact authenticated dashboard markup for courses.
-- Exact authenticated course page markup for assignments.
-- Exact assignment upload form field names and result-page DOM for a real account.
-- Whether any accounts trigger extra anti-automation controls after successful login.
+## Sandbox-specific blocker
+- Chromium download now works in this environment.
+- Chromium launch still fails in this Codex sandbox with a macOS Mach-port permission error:
+  - `bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer... Permission denied (1100)`
+- That means the Playwright runtime can be installed here but not actually executed end-to-end here.
+
+## Remaining live-validation gaps
+- No real Gradescope login was re-run through the new npm CLI in this sandbox because the browser cannot launch here.
+- No live submit was re-run through the new npm CLI in this sandbox for the same reason.
+- The new public CLI still needs one browser-capable machine validation with real credentials for:
+  - login
+  - class listing
+  - assignment listing
+  - `submit <file>`
+  - result scraping
+  - autograder-message-present case

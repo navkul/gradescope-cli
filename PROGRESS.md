@@ -1,36 +1,80 @@
 # PROGRESS.md
 
 ## Current status
-- In progress: shipped initial Go CLI implementation with login/session persistence, course and assignment scraping, submission form discovery, result scraping, parser tests, and live invalid-login smoke validation.
+- Refreshed on 2026-03-21 after the Playwright-first npm CLI refactor.
+- The repo now includes a public npm-oriented CLI path intended to be usable from anywhere in the terminal:
+  - npm package install path
+  - repo clone plus `npm link` path
+- The README and packaging metadata now document that path.
 
-## Milestones
-- 2026-03-20: Confirmed Gradescope login is a CSRF-protected HTML form with cookie-backed session semantics.
-- 2026-03-20: Chosen architecture converged on Go-only HTTP/session client with HTML parsing.
-- 2026-03-20: Created runnable CLI skeleton and parser test coverage.
-- 2026-03-20: `go test ./...`, `go build ./cmd/gradescope-cli`, and a live invalid-login CLI smoke check all passed.
+## Completed in this refactor
+- Added a new npm `bin` entrypoint:
+  - `gradescope-cli -> ./bin/gradescope-cli.mjs`
+- Added a Playwright-first command runtime in:
+  - `src/cli.mjs`
+  - `playwright/core.mjs`
+- Added config, credential, prompt, and path helper modules for the new CLI.
+- Simplified the public command surface around:
+  - `login`
+  - `classes`
+  - `assignments`
+  - `submit <file>`
+  - `result`
+- Made `submit <file>` the main happy-path command.
+- Made `assignments` and `submit` prompt interactively when the course or assignment is omitted.
+- Added current-working-directory-relative upload path resolution for `submit <file>`.
+- Added install-time Chromium download through npm `postinstall`.
+- Forced Playwright browser downloads into the package-local browser directory with `PLAYWRIGHT_BROWSERS_PATH=0`.
+- Added a full README with installation, usage, commands, options, and environment variables.
+- Updated:
+  - `FINDINGS.md`
+  - `ARCHITECTURE.md`
+  - `PROGRESS.md`
 
-## Completed
-- Created Go module and project layout.
-- Added `.gitignore` for local secrets, debug output, and build artifacts.
-- Implemented credential loading from env vars, password files, and credentials files.
-- Implemented session persistence to a local config session file.
-- Implemented login, classes, assignments, submit, result, and wizard commands.
-- Added unit tests for core parsing helpers.
-- Verified the built CLI against the live Gradescope login page with an invalid-credential smoke test.
-- Updated `FINDINGS.md` and `ARCHITECTURE.md` with current evidence and design.
+## Validation completed
+- `node ./bin/gradescope-cli.mjs help`
+  - passed
+- `npm run check`
+  - passed
+- `npm test`
+  - passed with browser-backed tests skipped because Chromium launch is blocked in this sandbox
+- `npm_config_cache=/tmp/gradescope-cli-npm-cache npm install`
+  - passed
+- `npm_config_cache=/tmp/gradescope-cli-npm-cache npm pack --dry-run`
+  - passed
+- `GOCACHE=/tmp/gradescope-cli-gocache go test ./...`
+  - passed
 
-## In progress
-- Preparing for authenticated validation once local credentials are available.
+## What works now
+- The npm package shape is valid and exposes the expected CLI command.
+- The install path automatically downloads Chromium.
+- The new CLI help and command parsing are in place.
+- The new CLI resolves submission file paths from the current working directory.
+- The repo now includes formal public-facing documentation in `README.md`.
 
-## Blockers
-- No Gradescope credentials were present in the repo or environment during this run, so authenticated end-to-end validation is still pending.
-- Course, assignment, and result parsers are built to be resilient, but they still need confirmation against real authenticated HTML.
+## What is still blocked here
+- Chromium can be downloaded in this sandbox but cannot be launched.
+- The concrete browser launch failure here is:
+  - macOS Mach-port rendezvous permission denied
+- Because of that, this environment cannot run a real end-to-end Gradescope session through the new Playwright CLI.
 
-## Next steps
-- Run a local login and listing flow with real credentials from a local file or environment variables.
-- Capture authenticated HTML samples if parser tuning is needed.
-- Validate a real submission and result page, including the no-response and autograder-present cases.
+## Remaining next steps
+- Run the new npm CLI on a normal local machine that can launch Chromium.
+- Validate with real credentials:
+  - `gradescope-cli login`
+  - `gradescope-cli classes`
+  - `gradescope-cli assignments`
+  - `gradescope-cli submit <file>`
+  - `gradescope-cli result <submission>`
+- Confirm one real autograder-output case through the new CLI.
+- Decide whether to fully remove or formally deprecate the older Go-first command path after the new npm path is live-verified.
 
-## Final summary
-- The repository now contains a substantial Go-first vertical slice instead of only planning documents.
-- Tooling validation is complete; final confidence now depends on one authenticated validation pass with real user credentials.
+## Final state summary
+- The repo now moves materially toward the requested architecture:
+  - full Playwright use for the public CLI path
+  - global npm-style usage
+  - automatic browser setup
+  - simpler submit UX
+  - formal README documentation
+- The remaining gap is not packaging or command structure anymore.
+- The remaining gap is live browser-capable validation against the real Gradescope site outside this sandbox.

@@ -3,8 +3,10 @@ package gradescope
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -22,6 +24,27 @@ import (
 
 var courseHrefPattern = regexp.MustCompile(`^/courses/(\d+)$`)
 
+const (
+	userAgent                = "gradescope-cli/0.1"
+	flashErrorSelector       = ".alert-error, .alert-flashMessage.alert-error, .flash-error, .error"
+	courseShortSelector      = ".courseBox--shortname, .courseBox__shortname, .courseShortname"
+	courseNameSelector       = ".courseBox--name, .courseBox__name, .courseName, .course-name"
+	assignmentTitleSelector  = ".assignmentTitle, .table--primaryLink"
+	assignmentStatusSelector = ".submissionStatus, .label, .status"
+	submissionBodySelector   = ".submissionBody, .submissionContent, .submission"
+	autograderOutputSelector = ".autograderResults, .autograder-output, .autograderOutput"
+)
+
+type HTTPStatusError struct {
+	StatusCode int
+	Method     string
+	URL        string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s %s returned HTTP %d", e.Method, e.URL, e.StatusCode)
+}
+
 type Client struct {
 	baseURL  string
 	http     *http.Client
@@ -29,6 +52,7 @@ type Client struct {
 }
 
 type SubmitOptions struct {
+	CourseID     string
 	AssignmentID string
 	FilePath     string
 }
@@ -146,47 +170,39 @@ func (c *Client) ListAssignments(ctx context.Context, courseID string) ([]Assign
 }
 
 func (c *Client) Submit(ctx context.Context, options SubmitOptions) (*SubmissionResult, error) {
-	doc, finalURL, err := c.getDocument(ctx, fmt.Sprintf("/assignments/%s", options.AssignmentID))
-	if err != nil {
-		return nil, err
+	options.CourseID = strings.TrimSpace(options.CourseID)
+	options.AssignmentID = strings.TrimSpace(options.AssignmentID)
+	options.FilePath = strings.TrimSpace(options.FilePath)
+
+	if options.AssignmentID == "" {
+		return nil, errors.New("missing assignment ID")
+	}
+	if options.FilePath == "" {
+		return nil, errors.New("missing file path")
 	}
 
-	if strings.HasPrefix(finalURL.Path, "/login") {
-		return nil, errors.New("not logged in")
+	backend := strings.ToLower(strings.TrimSpace(os.Getenv("GRADESCOPE_SUBMIT_BACKEND")))
+	if backend == "" {
+		backend = "auto"
 	}
 
-	form, err := parseUploadForm(doc, finalURL.String())
-	if err != nil {
-		_ = c.writeDebug(fmt.Sprintf("assignment-%s.html", options.AssignmentID), doc)
-		return nil, err
+	switch backend {
+	case "auto", "playwright":
+		return c.submitWithPlaywright(ctx, options)
+	case "http":
+		return nil, errors.New("the Go-only HTTP submit backend is disabled because it does not complete live Gradescope submissions; use the default Playwright submit backend instead")
+	default:
+		return nil, fmt.Errorf("unsupported GRADESCOPE_SUBMIT_BACKEND %q", backend)
 	}
-
-	file, err := os.Open(options.FilePath)
-	if err != nil {
-		return nil, fmt.Errorf("open file: %w", err)
-	}
-	defer file.Close()
-
-	doc, finalURL, err = c.submitForm(ctx, form, &uploadFile{
-		FieldName: form.FileFieldName,
-		FileName:  filepath.Base(options.FilePath),
-		Reader:    file,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("submit assignment file: %w", err)
-	}
-
-	result := extractSubmissionResult(doc, finalURL.String())
-	if result.SubmissionID == "" {
-		result.SubmissionID = extractSubmissionID(finalURL.Path)
-	}
-
-	return &result, nil
 }
 
 func (c *Client) Result(ctx context.Context, submissionID string) (*SubmissionResult, error) {
-	doc, finalURL, err := c.getDocument(ctx, fmt.Sprintf("/submissions/%s", submissionID))
+	doc, finalURL, err := c.getDocument(ctx, resolveSubmissionReference(submissionID))
 	if err != nil {
+		var statusErr *HTTPStatusError
+		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound && !looksLikeSubmissionPath(submissionID) {
+			return nil, fmt.Errorf("submission %s was not found at /submissions/%s; use the full nested submission URL instead, for example /courses/<course>/assignments/<assignment>/submissions/%s", submissionID, submissionID, submissionID)
+		}
 		return nil, err
 	}
 
@@ -215,7 +231,7 @@ func (c *Client) getDocument(ctx context.Context, path string) (*goquery.Documen
 		return nil, nil, err
 	}
 
-	req.Header.Set("User-Agent", "gradescope-cli/0.1")
+	req.Header.Set("User-Agent", userAgent)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -223,7 +239,20 @@ func (c *Client) getDocument(ctx context.Context, path string) (*goquery.Documen
 	}
 	defer resp.Body.Close()
 
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, resp.Request.URL, &HTTPStatusError{
+			StatusCode: resp.StatusCode,
+			Method:     req.Method,
+			URL:        resp.Request.URL.String(),
+		}
+	}
+
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -277,7 +306,7 @@ func (c *Client) submitForm(ctx context.Context, frm form, file *uploadFile) (*g
 	}
 
 	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("User-Agent", "gradescope-cli/0.1")
+	req.Header.Set("User-Agent", userAgent)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -285,7 +314,20 @@ func (c *Client) submitForm(ctx context.Context, frm form, file *uploadFile) (*g
 	}
 	defer resp.Body.Close()
 
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, resp.Request.URL, &HTTPStatusError{
+			StatusCode: resp.StatusCode,
+			Method:     req.Method,
+			URL:        resp.Request.URL.String(),
+		}
+	}
+
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -426,7 +468,7 @@ func buildForm(sel *goquery.Selection, pageURL string) form {
 }
 
 func extractFlashMessage(doc *goquery.Document) string {
-	return normalizeWhitespace(doc.Find(".alert-error, .alert-flashMessage.alert-error, .flash-error, .error").First().Text())
+	return normalizeWhitespace(doc.Find(flashErrorSelector).First().Text())
 }
 
 func extractCourses(doc *goquery.Document, baseURL string) []Course {
@@ -446,10 +488,16 @@ func extractCourses(doc *goquery.Document, baseURL string) []Course {
 		}
 
 		raw := normalizeWhitespace(sel.Text())
-		name := raw
-		short := normalizeWhitespace(findNearbyText(sel, ".courseBox--shortname, .courseBox__shortname, .courseShortname"))
+		short := normalizeWhitespace(findNearbyText(sel, courseShortSelector))
 		if short == "" {
 			short = firstLine(raw)
+		}
+		name := normalizeWhitespace(findNearbyText(sel, courseNameSelector))
+		if name == "" {
+			name = stripLeadingCourseShort(raw, short)
+		}
+		if name == "" {
+			name = raw
 		}
 
 		seen[courseID] = true
@@ -466,6 +514,11 @@ func extractCourses(doc *goquery.Document, baseURL string) []Course {
 }
 
 func extractAssignments(doc *goquery.Document, baseURL, courseID string) []Assignment {
+	tableAssignments := extractAssignmentsFromTable(doc, baseURL, courseID)
+	if len(tableAssignments) > 0 {
+		return tableAssignments
+	}
+
 	seen := map[string]bool{}
 	assignments := []Assignment{}
 	prefixes := []string{
@@ -486,24 +539,27 @@ func extractAssignments(doc *goquery.Document, baseURL, courseID string) []Assig
 				break
 			}
 		}
-		if !matchesPrefix || strings.Contains(href, "/submissions") {
+		if !matchesPrefix {
 			return
 		}
 
-		id := lastNumericPathSegment(href)
+		id := extractAssignmentID(href)
+		if id == "" {
+			id = lastNumericPathSegment(href)
+		}
 		if id == "" || seen[id] {
 			return
 		}
 
 		title := normalizeWhitespace(sel.Text())
 		if title == "" {
-			title = normalizeWhitespace(findNearbyText(sel, ".assignmentTitle, .table--primaryLink"))
+			title = normalizeWhitespace(findNearbyText(sel, assignmentTitleSelector))
 		}
 		if title == "" {
 			return
 		}
 
-		status := normalizeWhitespace(findNearbyText(sel, ".submissionStatus, .label, .status"))
+		status := normalizeWhitespace(findNearbyText(sel, assignmentStatusSelector))
 
 		seen[id] = true
 		assignments = append(assignments, Assignment{
@@ -513,6 +569,45 @@ func extractAssignments(doc *goquery.Document, baseURL, courseID string) []Assig
 			URL:      absoluteURL(baseURL, href),
 			Status:   status,
 			Raw:      title,
+		})
+	})
+
+	return assignments
+}
+
+func extractAssignmentsFromTable(doc *goquery.Document, baseURL, courseID string) []Assignment {
+	rows := doc.Find("#assignments-student-table tbody tr")
+	if rows.Length() == 0 {
+		return nil
+	}
+
+	seen := map[string]bool{}
+	assignments := []Assignment{}
+
+	rows.Each(func(_ int, row *goquery.Selection) {
+		header := row.Find("th[scope='row']").First()
+		title := normalizeWhitespace(header.Text())
+		if title == "" {
+			return
+		}
+
+		link := header.Find("a[href]").First()
+		href := strings.TrimSpace(selectionAttr(link, "href"))
+		id := extractAssignmentID(href)
+		if id == "" || seen[id] {
+			return
+		}
+
+		status := normalizeWhitespace(row.Find(".submissionStatus").First().Text())
+
+		seen[id] = true
+		assignments = append(assignments, Assignment{
+			ID:       id,
+			CourseID: courseID,
+			Title:    title,
+			URL:      absoluteURL(baseURL, href),
+			Status:   status,
+			Raw:      normalizeWhitespace(row.Text()),
 		})
 	})
 
@@ -531,13 +626,13 @@ func extractSubmissionResult(doc *goquery.Document, pageURL string) SubmissionRe
 			findSectionText(doc, "Submission"),
 			findSectionText(doc, "Response"),
 			findSectionText(doc, "Results"),
-			doc.Find(".submissionBody, .submissionContent, .submission").First().Text(),
+			doc.Find(submissionBodySelector).First().Text(),
 		)),
 		AutograderMessage: normalizeWhitespace(firstNonEmpty(
 			findSectionText(doc, "Autograder"),
 			findSectionText(doc, "Autograder Output"),
 			findSectionText(doc, "Output"),
-			doc.Find(".autograderResults, .autograder-output, .autograderOutput").First().Text(),
+			doc.Find(autograderOutputSelector).First().Text(),
 		)),
 	}
 
@@ -547,7 +642,63 @@ func extractSubmissionResult(doc *goquery.Document, pageURL string) SubmissionRe
 	result.HasAutograder = result.AutograderMessage != ""
 	result.SubmissionID = extractSubmissionIDFromURL(pageURL)
 
+	if reactResult, ok := extractSubmissionReactResult(doc, pageURL); ok {
+		if reactResult.SubmissionID != "" {
+			result.SubmissionID = reactResult.SubmissionID
+		}
+		if reactResult.URL != "" {
+			result.URL = reactResult.URL
+		}
+		if reactResult.Status != "" {
+			result.Status = reactResult.Status
+		}
+		if result.Response == "" && reactResult.Response != "" {
+			result.Response = reactResult.Response
+		}
+		if reactResult.AutograderMessage != "" {
+			result.AutograderMessage = reactResult.AutograderMessage
+			result.HasAutograder = true
+		}
+	}
+
 	return result
+}
+
+type submissionReactProps struct {
+	AssignmentSubmission struct {
+		ID     int64  `json:"id"`
+		Status string `json:"status"`
+	} `json:"assignment_submission"`
+	Paths struct {
+		SubmissionPath string `json:"submission_path"`
+	} `json:"paths"`
+	Alert  string   `json:"alert"`
+	Alerts []string `json:"alerts"`
+}
+
+func extractSubmissionReactResult(doc *goquery.Document, pageURL string) (SubmissionResult, bool) {
+	node := doc.Find(`[data-react-class="AssignmentSubmissionViewer"]`).First()
+	if node.Length() == 0 {
+		return SubmissionResult{}, false
+	}
+
+	raw := html.UnescapeString(selectionAttr(node, "data-react-props"))
+	if strings.TrimSpace(raw) == "" {
+		return SubmissionResult{}, false
+	}
+
+	var props submissionReactProps
+	if err := json.Unmarshal([]byte(raw), &props); err != nil {
+		return SubmissionResult{}, false
+	}
+
+	result := SubmissionResult{
+		SubmissionID: formatIntID(props.AssignmentSubmission.ID),
+		URL:          absoluteURLFromPage(pageURL, props.Paths.SubmissionPath),
+		Status:       normalizeWhitespace(props.AssignmentSubmission.Status),
+		Response:     normalizeWhitespace(firstNonEmpty(props.Alert, strings.Join(props.Alerts, " "))),
+	}
+	return result, true
 }
 
 func extractSubmissionIDFromURL(rawURL string) string {
@@ -567,6 +718,15 @@ func extractSubmissionID(path string) string {
 	return ""
 }
 
+func extractAssignmentID(path string) string {
+	re := regexp.MustCompile(`/assignments/(\d+)`)
+	matches := re.FindStringSubmatch(path)
+	if len(matches) == 2 {
+		return matches[1]
+	}
+	return ""
+}
+
 func findSectionText(doc *goquery.Document, heading string) string {
 	var result string
 
@@ -575,12 +735,45 @@ func findSectionText(doc *goquery.Document, heading string) string {
 			return true
 		}
 
+		for sibling := sel.Next(); sibling.Length() > 0; sibling = sibling.Next() {
+			if isHeading(sibling) {
+				break
+			}
+			text := normalizeWhitespace(sibling.Text())
+			if text != "" {
+				result = text
+				return false
+			}
+		}
+
 		container := sel.Parent()
-		result = normalizeWhitespace(container.Text())
+		if container.Length() == 0 {
+			result = ""
+			return false
+		}
+		switch strings.ToLower(goquery.NodeName(container)) {
+		case "body", "html":
+			result = ""
+			return false
+		}
+		if container.Find("h1, h2, h3, h4, h5, h6").Length() > 1 {
+			result = ""
+			return false
+		}
+		result = stripSectionHeading(normalizeWhitespace(container.Text()), normalizeWhitespace(sel.Text()))
 		return false
 	})
 
 	return result
+}
+
+func isHeading(sel *goquery.Selection) bool {
+	switch strings.ToLower(goquery.NodeName(sel)) {
+	case "h1", "h2", "h3", "h4", "h5", "h6":
+		return true
+	default:
+		return false
+	}
 }
 
 func findNearbyText(sel *goquery.Selection, selector string) string {
@@ -623,6 +816,22 @@ func absoluteURL(baseURL, href string) string {
 	return parsed.String()
 }
 
+func absoluteURLFromPage(pageURL, href string) string {
+	if strings.TrimSpace(href) == "" {
+		return ""
+	}
+
+	base, err := url.Parse(pageURL)
+	if err != nil {
+		return href
+	}
+	parsed, err := base.Parse(href)
+	if err != nil {
+		return href
+	}
+	return parsed.String()
+}
+
 func normalizeWhitespace(value string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
 }
@@ -645,6 +854,60 @@ func firstLine(value string) string {
 		}
 	}
 	return ""
+}
+
+func stripLeadingCourseShort(raw, short string) string {
+	raw = normalizeWhitespace(raw)
+	short = normalizeWhitespace(short)
+	if raw == "" || short == "" {
+		return raw
+	}
+
+	lowerRaw := strings.ToLower(raw)
+	lowerShort := strings.ToLower(short)
+	if !strings.HasPrefix(lowerRaw, lowerShort) {
+		return raw
+	}
+
+	trimmed := strings.TrimSpace(raw[len(short):])
+	return strings.TrimSpace(strings.TrimLeft(trimmed, "-|:"))
+}
+
+func stripSectionHeading(text, heading string) string {
+	text = normalizeWhitespace(text)
+	heading = normalizeWhitespace(heading)
+	if text == "" || heading == "" {
+		return text
+	}
+	if strings.EqualFold(text, heading) {
+		return ""
+	}
+	if !strings.HasPrefix(strings.ToLower(text), strings.ToLower(heading)) {
+		return text
+	}
+
+	trimmed := strings.TrimSpace(text[len(heading):])
+	trimmed = strings.TrimLeft(trimmed, ":|-")
+	return strings.TrimSpace(trimmed)
+}
+
+func resolveSubmissionReference(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if looksLikeSubmissionPath(ref) {
+		return ref
+	}
+	return "/submissions/" + ref
+}
+
+func looksLikeSubmissionPath(ref string) bool {
+	return strings.Contains(ref, "/submissions/")
+}
+
+func formatIntID(id int64) string {
+	if id == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d", id)
 }
 
 func (c *Client) writeDebug(name string, doc *goquery.Document) error {
