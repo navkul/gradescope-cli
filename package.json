@@ -1,5 +1,5 @@
 {
-  "name": "gradescope-cli",
+  "name": "gradescope-playwright-cli",
   "version": "0.2.0",
   "description": "A Playwright-first Gradescope CLI for login, browsing courses, and submitting files.",
   "type": "module",

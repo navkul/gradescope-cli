@@ -4,13 +4,23 @@
 
 ## Install
 
-### From npm
+### From npm after publish
 
 ```bash
-npm install -g gradescope-cli
+npm install -g gradescope-playwright-cli
+```
+
+The installed command is still:
+
+```bash
+gradescope-cli
 ```
 
 The package installs Playwright and runs a postinstall step that downloads Chromium automatically. You should not need to run a separate `npx playwright install chromium` step unless the browser download fails or you skipped install scripts.
+
+Do not use `npm install -g gradescope-cli`. That package name is already taken on npm by an unrelated abandoned package from 2019 that pulls in deprecated dependencies such as `request` and `zlib`, which is why installs fail with `node-waf: command not found`.
+
+As of March 21, 2026, `gradescope-playwright-cli` is the corrected package name for this repo, but it has not been published yet. Until it is published, install from a local clone or tarball.
 
 ### From a local clone
 
@@ -22,6 +32,13 @@ npm link
 ```
 
 `npm install` downloads the JavaScript dependencies and Chromium. `npm link` exposes the global `gradescope-cli` command so you can run it from anywhere in your terminal.
+
+You can also install the current repo build as a tarball without publishing it:
+
+```bash
+npm pack
+npm install -g ./gradescope-playwright-cli-*.tgz
+```
 
 If you need to skip the browser download temporarily, set `GRADESCOPE_SKIP_BROWSER_DOWNLOAD=1` before install.
 
