@@ -1,0 +1,8 @@
+.env
+.env.*
+.gradescope/
+debug/
+dist/
+bin/
+/gradescope-cli
+coverage.out
