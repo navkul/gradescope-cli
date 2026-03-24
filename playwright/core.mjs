@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { DEFAULT_BASE_URL } from "../src/config.mjs";
+import { resolveAssignment } from "../src/lookup.mjs";
 
 const COURSE_SHORT_SELECTOR = ".courseBox--shortname, .courseBox__shortname, .courseShortname";
 const COURSE_NAME_SELECTOR = ".courseBox--name, .courseBox__name, .courseName, .course-name";
@@ -608,17 +609,6 @@ async function findSectionText(page, headingText) {
   }
 
   return "";
-}
-
-function resolveAssignment(assignments, hint) {
-  if (!hint) {
-    return null;
-  }
-
-  const normalizedHint = normalizeWhitespace(hint).toLowerCase();
-  return assignments.find((assignment) => {
-    return assignment.id === hint || normalizeWhitespace(assignment.title).toLowerCase() === normalizedHint;
-  }) || null;
 }
 
 function stripToAssignmentPath(href) {

@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
-import { defaultBaseUrl, defaultSessionPath } from "./config.mjs";
 import { loadCredentials } from "./credentials.mjs";
 import { validateUploadPath } from "./path-utils.mjs";
+import { renderCompletionScript, getCompletionSuggestions } from "./completion.mjs";
+import { commonOptions, firstPositional, parseArgs } from "./command-utils.mjs";
+import { resolveCourse } from "./lookup.mjs";
 import {
   login,
   listAssignments,
@@ -17,6 +19,11 @@ import {
 } from "./ui.mjs";
 
 export async function main(argv = process.argv.slice(2)) {
+  if (argv[0] === "__complete") {
+    await runHiddenCompletion(argv.slice(1));
+    return;
+  }
+
   const parsed = parseArgs(argv);
   const command = parsed.command || "wizard";
 
@@ -35,6 +42,9 @@ export async function main(argv = process.argv.slice(2)) {
       return;
     case "result":
       await runResult(parsed);
+      return;
+    case "completion":
+      await runCompletion(parsed);
       return;
     case "wizard":
     case "run":
@@ -68,12 +78,15 @@ async function runClasses(parsed) {
 
 async function runAssignments(parsed) {
   const options = commonOptions(parsed.options);
-  let courseId = firstPositional(parsed, 0) || String(parsed.options.course || "").trim();
+  const courseHint = firstPositional(parsed, 0) || String(parsed.options.course || "").trim();
+  let courseId = "";
 
-  if (!courseId) {
+  if (!courseHint) {
     const courses = await listCourses(options);
     const selectedCourse = await promptSelection("Choose a class:", courses, formatCourse);
     courseId = selectedCourse.id;
+  } else {
+    courseId = await resolveCourseId(options, courseHint);
   }
 
   const assignments = await listAssignments({
@@ -90,11 +103,14 @@ async function runSubmit(parsed) {
 
   await ensureSessionForInteractiveFlow(options, parsed.options);
 
-  let courseId = String(parsed.options.course || "").trim();
-  if (!courseId) {
+  const courseHint = String(parsed.options.course || "").trim();
+  let courseId = "";
+  if (!courseHint) {
     const courses = await listCourses(options);
     const selectedCourse = await promptSelection("Choose a class:", courses, formatCourse);
     courseId = selectedCourse.id;
+  } else {
+    courseId = await resolveCourseId(options, courseHint);
   }
 
   let assignmentHint = String(parsed.options.assignment || "").trim();
@@ -131,6 +147,15 @@ async function runResult(parsed) {
   printSubmissionResult(submissionResult);
 }
 
+async function runCompletion(parsed) {
+  const shell = firstPositional(parsed, 0).toLowerCase();
+  if (!shell) {
+    throw new Error("missing shell name; use `gradescope-cli completion bash` or `gradescope-cli completion zsh`");
+  }
+
+  console.log(renderCompletionScript(shell));
+}
+
 async function runWizard(parsed) {
   const options = commonOptions(parsed.options);
   const fileArg = firstPositional(parsed, 0) || parsed.options.file;
@@ -141,14 +166,6 @@ async function runWizard(parsed) {
   await runSubmit(parsed);
 }
 
-function commonOptions(options) {
-  return {
-    baseUrl: options.baseUrl || defaultBaseUrl(),
-    sessionFile: options.sessionFile || defaultSessionPath(),
-    headless: options.headful ? false : undefined,
-  };
-}
-
 async function ensureSessionForInteractiveFlow(options, rawOptions) {
   await fs.access(options.sessionFile).catch(async () => {
     const credentials = await loadCredentials(rawOptions, { promptForMissing: true });
@@ -157,6 +174,31 @@ async function ensureSessionForInteractiveFlow(options, rawOptions) {
       ...credentials,
     });
   });
+}
+
+async function resolveCourseId(options, hint) {
+  const courses = await listCourses(options);
+  const course = resolveCourse(courses, hint);
+  if (!course) {
+    throw new Error(`could not find course "${hint}". Use the course ID, exact course name, or exact short name.`);
+  }
+  return course.id;
+}
+
+async function runHiddenCompletion(argv) {
+  const cword = Number.parseInt(String(argv[0] || ""), 10);
+  if (!Number.isFinite(cword)) {
+    return;
+  }
+
+  const suggestions = await getCompletionSuggestions({
+    cword,
+    words: argv.slice(1),
+  }).catch(() => []);
+
+  for (const suggestion of suggestions) {
+    console.log(suggestion);
+  }
 }
 
 function formatCourse(course) {
@@ -176,60 +218,8 @@ function formatAssignment(assignment) {
   return assignment.title;
 }
 
-function parseArgs(argv) {
-  const args = [...argv];
-  let command = "";
-  if (args[0]) {
-    if (isHelpToken(args[0])) {
-      command = "help";
-      args.shift();
-    } else if (!args[0].startsWith("-")) {
-      command = args.shift();
-    }
-  }
-  const options = {};
-  const positionals = [];
-
-  for (let index = 0; index < args.length; index += 1) {
-    const token = args[index];
-    if (!token.startsWith("--")) {
-      positionals.push(token);
-      continue;
-    }
-
-    const [name, inlineValue] = token.slice(2).split("=", 2);
-    if (inlineValue !== undefined) {
-      options[toCamelCase(name)] = inlineValue;
-      continue;
-    }
-
-    const next = args[index + 1];
-    if (next && !next.startsWith("--")) {
-      options[toCamelCase(name)] = next;
-      index += 1;
-      continue;
-    }
-
-    options[toCamelCase(name)] = true;
-  }
-
-  return { command, options, positionals };
-}
-
 export function parseCliArgs(argv) {
   return parseArgs(argv);
-}
-
-function firstPositional(parsed, index) {
-  return String(parsed.positionals[index] || "").trim();
-}
-
-function toCamelCase(value) {
-  return value.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
-}
-
-function isHelpToken(value) {
-  return value === "--help" || value === "-h";
 }
 
 function printHelp() {
@@ -238,12 +228,15 @@ function printHelp() {
 Usage:
   gradescope-cli login [--credentials-file creds.json]
   gradescope-cli classes
-  gradescope-cli assignments [course-id]
-  gradescope-cli submit <file> [--course <course-id>] [--assignment <assignment-id-or-title>]
+  gradescope-cli assignments [course-id-or-name-or-short]
+  gradescope-cli submit <file> [--course <course-id-or-name-or-short>] [--assignment <assignment-id-or-title>]
   gradescope-cli result <submission-id-or-url>
+  gradescope-cli completion <bash|zsh>
 
 Notes:
   submit <file> is the simplest path. If --course or --assignment are omitted, the CLI prompts you.
+  Course matching accepts an exact ID, exact course name, or exact short name.
+  Assignment matching accepts an exact ID or exact title case-insensitively.
   Relative file paths are resolved from your current working directory.
 
 Environment:

@@ -58,7 +58,7 @@ The simplest submission flow is:
 gradescope-cli submit ./submission.pdf
 ```
 
-If you omit `--course` or `--assignment`, the CLI prompts you to choose them interactively from the authenticated account.
+If you omit `--course` or `--assignment`, the CLI prompts you to choose them interactively from the authenticated account. When you do pass `--course`, the CLI accepts an exact course ID, exact course name, or exact short name. `--assignment` accepts an exact assignment ID or exact assignment title case-insensitively.
 
 ## Commands
 
@@ -97,14 +97,16 @@ Output format:
 <course-id>    <course-short> | <course-name>
 ```
 
-### `gradescope-cli assignments [course-id]`
+### `gradescope-cli assignments [course-id-or-name-or-short]`
 
-Lists assignments for a course. If `course-id` is omitted, the CLI prompts you to pick a class first.
+Lists assignments for a course. If the course selector is omitted, the CLI prompts you to pick a class first. If it is provided, the CLI accepts an exact course ID, exact course name, or exact short name.
 
 ```bash
 gradescope-cli assignments
 gradescope-cli assignments 123456
 gradescope-cli assignments --course 123456
+gradescope-cli assignments --course CS101
+gradescope-cli assignments --course "Distributed Systems"
 ```
 
 Output format:
@@ -122,6 +124,8 @@ Submits a local file. The file path is resolved from your current working direct
 ```bash
 gradescope-cli submit ./submission.pdf
 gradescope-cli submit ./submission.pdf --course 123456
+gradescope-cli submit ./submission.pdf --course CS101
+gradescope-cli submit ./submission.pdf --course "Distributed Systems"
 gradescope-cli submit ./submission.pdf --course 123456 --assignment 7891011
 gradescope-cli submit ./submission.pdf --course 123456 --assignment "Homework 4"
 ```
@@ -131,8 +135,50 @@ Behavior:
 - If no session file exists, the CLI logs in first.
 - If `--course` is omitted, the CLI prompts you to pick a class.
 - If `--assignment` is omitted, the CLI prompts you to pick an assignment.
-- Assignment matching accepts either an assignment ID or an exact title.
+- Course matching accepts either an exact course ID, exact course name, or exact short name.
+- Assignment matching accepts either an exact assignment ID or an exact title case-insensitively.
 - After upload, the CLI prints the submission URL, status, response text, and autograder text if it is available.
+
+### `gradescope-cli completion <bash|zsh>`
+
+Prints a shell completion script.
+
+```bash
+gradescope-cli completion bash
+gradescope-cli completion zsh
+```
+
+Useful install patterns:
+
+```bash
+source <(gradescope-cli completion bash)
+autoload -U compinit && compinit
+source <(gradescope-cli completion zsh)
+```
+
+If you are running from a local clone instead of an installed `gradescope-cli` binary on your `PATH`, use:
+
+```bash
+autoload -U compinit && compinit
+source <(node ./bin/gradescope-cli.mjs completion zsh)
+```
+
+For a persistent zsh setup, add this to `~/.zshrc`:
+
+```zsh
+autoload -U compinit
+compinit
+source <(gradescope-cli completion zsh)
+```
+
+Then open a new shell before testing completion.
+
+Completion behavior:
+
+- `--course` suggestions come from the saved session when it is available.
+- `--assignment` suggestions come from the saved session and the already-selected `--course` when both are available.
+- `--file` uses native shell file completion.
+- If no saved session is available, completion falls back gracefully to static command and option suggestions.
 
 ### `gradescope-cli result <submission-id-or-url>`
 

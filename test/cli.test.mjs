@@ -13,3 +13,9 @@ test("parseCliArgs preserves explicit subcommands", () => {
   assert.deepEqual(parsed.positionals, ["./submission.pdf"]);
   assert.equal(parsed.options.course, "123");
 });
+
+test("parseCliArgs keeps the completion command positional shell", () => {
+  const parsed = parseCliArgs(["completion", "bash"]);
+  assert.equal(parsed.command, "completion");
+  assert.deepEqual(parsed.positionals, ["bash"]);
+});
