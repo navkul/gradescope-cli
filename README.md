@@ -217,6 +217,38 @@ You can override the config root with `GRADESCOPE_CONFIG_DIR`.
 - `GRADESCOPE_CONFIG_DIR`
 - `GRADESCOPE_SKIP_BROWSER_DOWNLOAD`
 
+## Codex sandbox limitations
+
+`gradescope-cli` launches a real Chromium process through Playwright for `login`, `classes`, `assignments`, `submit`, and `result`. In the default Codex `workspace-write` sandbox on macOS, that browser process can be installed but it cannot start successfully.
+
+The failure usually looks like:
+
+```text
+bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer... Permission denied (1100)
+```
+
+This is not a path-resolution issue with your current working directory. It is a macOS sandbox restriction that prevents Chromium from registering the Mach service it needs during startup. In practice:
+
+- `gradescope-cli --help` still works
+- plain Node.js commands still work
+- browser-backed commands fail inside the default Codex sandbox
+
+Ways to run the CLI successfully from Codex:
+
+- use `danger-full-access` so Playwright can launch Chromium outside the restricted sandbox
+- or run the specific `gradescope-cli` command with sandbox escalation
+- or run the command in a normal terminal outside Codex
+
+You can still provide credentials non-interactively from Codex:
+
+```bash
+export GRADESCOPE_EMAIL="you@example.com"
+export GRADESCOPE_PASSWORD="your-password"
+gradescope-cli login
+```
+
+But the login command still requires a browser-capable environment. Setting credentials alone does not bypass the Chromium launch requirement.
+
 ## Development
 
 ```bash
