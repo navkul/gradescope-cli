@@ -16,7 +16,7 @@
   "scripts": {
     "postinstall": "node ./scripts/postinstall.mjs",
     "test": "node --test",
-    "check": "node --check ./bin/gradescope-cli.mjs && node --check ./src/cli.mjs && node --check ./src/command-utils.mjs && node --check ./src/completion.mjs && node --check ./src/lookup.mjs && node --check ./playwright/core.mjs"
+    "check": "node --check ./bin/gradescope-cli.mjs && node --check ./src/cli.mjs && node --check ./src/command-utils.mjs && node --check ./src/completion.mjs && node --check ./src/lookup.mjs && node --check ./src/path-utils.mjs && node --check ./src/submission-options.mjs && node --check ./playwright/core.mjs"
   },
   "engines": {
     "node": ">=18"

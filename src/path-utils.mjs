@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { normalizeStringList } from "./submission-options.mjs";
 
 export function resolveUploadPath(rawPath, cwd = process.cwd()) {
   const trimmed = String(rawPath || "").trim();
@@ -30,4 +31,32 @@ export async function validateUploadPath(rawPath, cwd = process.cwd()) {
   }
 
   return resolved;
+}
+
+export function resolveUploadPaths(rawPaths, cwd = process.cwd()) {
+  const values = normalizeStringList(rawPaths);
+  if (values.length === 0) {
+    throw new Error("missing file path");
+  }
+
+  return values.map((rawPath) => resolveUploadPath(rawPath, cwd));
+}
+
+export async function validateUploadPaths(rawPaths, cwd = process.cwd()) {
+  const resolvedPaths = resolveUploadPaths(rawPaths, cwd);
+  const validated = [];
+
+  for (const resolvedPath of resolvedPaths) {
+    const info = await fs.stat(resolvedPath.absolutePath).catch((error) => {
+      throw new Error(`submission file ${resolvedPath.absolutePath}: ${error.message}`);
+    });
+
+    if (info.isDirectory()) {
+      throw new Error(`submission file ${resolvedPath.absolutePath} is a directory`);
+    }
+
+    validated.push(resolvedPath);
+  }
+
+  return validated;
 }

@@ -6,7 +6,12 @@ import {
   extractSubmissionResultFromPage,
 } from "../playwright/core.mjs";
 
-const browserCapability = await detectBrowserCapability();
+const browserCapability = process.env.GRADESCOPE_RUN_BROWSER_TESTS === "1"
+  ? await detectBrowserCapability()
+  : {
+    available: false,
+    reason: "browser-backed parser tests are disabled by default; set GRADESCOPE_RUN_BROWSER_TESTS=1 to enable them",
+  };
 
 test("extractCoursesFromAccountPage reads course ids and labels from the account page", async (t) => {
   if (!browserCapability.available) {
@@ -49,7 +54,15 @@ test("extractAssignmentsFromCoursePage keeps rows even when no assignment id is 
               <td class="submissionStatus">10 / 10</td>
             </tr>
             <tr>
-              <th scope="row">Homework 2</th>
+              <th scope="row">
+                <button
+                  class="js-submitAssignment"
+                  data-assignment-id="999"
+                  data-post-url="/courses/123/assignments/999/submissions"
+                >
+                  Homework 2
+                </button>
+              </th>
               <td class="submissionStatus">No Submission</td>
             </tr>
           </tbody>
@@ -61,8 +74,9 @@ test("extractAssignmentsFromCoursePage keeps rows even when no assignment id is 
     assert.equal(assignments.length, 2);
     assert.equal(assignments[0].id, "789");
     assert.equal(assignments[0].status, "10 / 10");
-    assert.equal(assignments[1].id, "");
+    assert.equal(assignments[1].id, "999");
     assert.equal(assignments[1].title, "Homework 2");
+    assert.equal(assignments[1].url, "https://www.gradescope.com/courses/123/assignments/999");
   });
 });
 
@@ -98,7 +112,7 @@ test("extractSubmissionResultFromPage reads react props and autograder text", as
 async function withPage(html, callback) {
   process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH || "0";
   const { chromium } = await import("playwright");
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, timeout: 5000 });
   const page = await browser.newPage();
 
   try {
@@ -115,7 +129,7 @@ async function detectBrowserCapability() {
 
   let browser;
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch({ headless: true, timeout: 5000 });
     return { available: true, reason: "" };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

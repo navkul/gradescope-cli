@@ -1,6 +1,6 @@
 # gradescope-cli
 
-`gradescope-cli` is a Playwright-first Gradescope CLI. It logs in through the real web app, lists classes and assignments, submits a local file, and prints the resulting submission status and any autograder text it can find.
+`gradescope-cli` is a Playwright-first Gradescope CLI. It logs in through the real web app, lists classes and assignments, supports both upload and GitHub submission flows, and prints the resulting submission status and any autograder text it can find.
 
 ## Install
 
@@ -48,17 +48,24 @@ If you need to skip the browser download temporarily, set `GRADESCOPE_SKIP_BROWS
 gradescope-cli login
 gradescope-cli classes
 gradescope-cli assignments
-gradescope-cli submit ./path/to/submission.pdf
+gradescope-cli submit
+gradescope-cli submit ./path/to/file1.py ./path/to/file2.py
+gradescope-cli submit --submission-type github --repo owner/project --branch main
 gradescope-cli result /courses/<course>/assignments/<assignment>/submissions/<submission>
 ```
 
 The simplest submission flow is:
 
 ```bash
-gradescope-cli submit ./submission.pdf
+gradescope-cli submit
 ```
 
-If you omit `--course` or `--assignment`, the CLI prompts you to choose them interactively from the authenticated account. When you do pass `--course`, the CLI accepts an exact course ID, exact course name, or exact short name. `--assignment` accepts an exact assignment ID or exact assignment title case-insensitively.
+If you omit `--course` or `--assignment`, the CLI prompts you to choose them interactively from the authenticated account. If you also omit the submit inputs, the CLI now prompts for the submission type:
+
+- `Upload`: prompts for one or more local file paths
+- `GitHub`: prompts for a repository, then prompts for a branch after the repo is selected
+
+When you do pass `--course`, the CLI accepts an exact course ID, exact course name, or exact short name. `--assignment` accepts an exact assignment ID or exact assignment title case-insensitively.
 
 ## Commands
 
@@ -117,17 +124,17 @@ Output format:
 
 Rows without a visible assignment ID are still shown. They remain selectable in the interactive submit flow even if Gradescope does not expose an ID on the course page.
 
-### `gradescope-cli submit <file>`
+### `gradescope-cli submit [file ...]`
 
-Submits a local file. The file path is resolved from your current working directory, so `gradescope-cli submit ./foo/bar.pdf` uses the directory you are currently in as the prefix when locating the file.
+Submits through either the `Upload` or `GitHub` Gradescope submission type. Upload file paths are resolved from your current working directory, so `gradescope-cli submit ./foo/bar.py` uses the directory you are currently in as the prefix when locating the file.
 
 ```bash
+gradescope-cli submit
 gradescope-cli submit ./submission.pdf
-gradescope-cli submit ./submission.pdf --course 123456
-gradescope-cli submit ./submission.pdf --course CS101
-gradescope-cli submit ./submission.pdf --course "Distributed Systems"
-gradescope-cli submit ./submission.pdf --course 123456 --assignment 7891011
-gradescope-cli submit ./submission.pdf --course 123456 --assignment "Homework 4"
+gradescope-cli submit ./main.py ./utils.py --course 123456 --assignment "Project 1"
+gradescope-cli submit --file ./main.py --file ./utils.py --course CS101 --assignment "Project 1"
+gradescope-cli submit --submission-type github --repo owner/project --branch main --course 123456 --assignment 7891011
+gradescope-cli submit --submission-type github --course "Distributed Systems" --assignment "Project 1"
 ```
 
 Behavior:
@@ -135,9 +142,14 @@ Behavior:
 - If no session file exists, the CLI logs in first.
 - If `--course` is omitted, the CLI prompts you to pick a class.
 - If `--assignment` is omitted, the CLI prompts you to pick an assignment.
+- If neither upload files nor GitHub repo/branch are provided, the CLI prompts you to choose `Upload` or `GitHub`.
+- Upload submissions accept one or more files through positional paths or `--file`.
+- Interactive upload mode prompts for additional files until you enter a blank line.
+- GitHub submissions accept `--repo` and `--branch`, or they can be chosen interactively from the live Gradescope form.
+- The branch list is loaded only after the repository is selected, so the CLI selects the repo first and then fetches the branch choices.
 - Course matching accepts either an exact course ID, exact course name, or exact short name.
 - Assignment matching accepts either an exact assignment ID or an exact title case-insensitively.
-- After upload, the CLI prints the submission URL, status, response text, and autograder text if it is available.
+- After submission, the CLI prints the submission URL, status, response text, and autograder text if it is available.
 
 ### `gradescope-cli completion <bash|zsh>`
 
@@ -177,6 +189,7 @@ Completion behavior:
 
 - `--course` suggestions come from the saved session when it is available.
 - `--assignment` suggestions come from the saved session and the already-selected `--course` when both are available.
+- `--submission-type` suggests `upload` and `github`.
 - `--file` uses native shell file completion.
 - If no saved session is available, completion falls back gracefully to static command and option suggestions.
 
@@ -254,6 +267,12 @@ But the login command still requires a browser-capable environment. Setting cred
 ```bash
 npm test
 npm run check
+```
+
+Browser-backed parser tests are skipped by default so `npm test` stays reliable in restricted environments. To opt into them on a browser-capable machine, run:
+
+```bash
+GRADESCOPE_RUN_BROWSER_TESTS=1 npm test
 ```
 
 The repo still contains the earlier Go implementation, but the public CLI and current primary path are now the Playwright-backed npm command.

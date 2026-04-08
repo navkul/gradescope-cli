@@ -10,13 +10,21 @@ import {
   resolveSubmissionReference,
   stripLeadingCourseShort,
 } from "../playwright/core.mjs";
-import { resolveUploadPath } from "../src/path-utils.mjs";
+import { resolveUploadPath, resolveUploadPaths } from "../src/path-utils.mjs";
 
 test("resolveUploadPath uses the current directory as the prefix for relative files", () => {
   const cwd = path.join("/tmp", "repo");
   const resolved = resolveUploadPath("submissions/hw1.pdf", cwd);
   assert.equal(resolved.absolutePath, path.join(cwd, "submissions", "hw1.pdf"));
   assert.equal(resolved.displayPath, path.join("submissions", "hw1.pdf"));
+});
+
+test("resolveUploadPaths preserves multiple upload files in order", () => {
+  const cwd = path.join("/tmp", "repo");
+  const resolved = resolveUploadPaths(["src/main.py", "README.md"], cwd);
+  assert.equal(resolved.length, 2);
+  assert.equal(resolved[0].absolutePath, path.join(cwd, "src", "main.py"));
+  assert.equal(resolved[1].displayPath, "README.md");
 });
 
 test("resolveSubmissionReference preserves nested submission paths", () => {

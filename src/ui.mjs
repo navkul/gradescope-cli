@@ -79,6 +79,25 @@ export async function promptSelection(prompt, items, formatter = (item) => item)
   return items[selected - 1];
 }
 
+export async function promptUploadPaths() {
+  const values = [];
+
+  while (true) {
+    const prompt = values.length === 0
+      ? "File path to submit: "
+      : `File path ${values.length + 1} (leave blank to finish): `;
+    const answer = await promptLine(prompt);
+    if (!answer) {
+      if (values.length === 0) {
+        throw new Error("at least one file path is required for upload submissions");
+      }
+      return values;
+    }
+
+    values.push(answer);
+  }
+}
+
 export function printCourses(courses) {
   for (const course of courses) {
     const label = course.short && course.short !== course.name

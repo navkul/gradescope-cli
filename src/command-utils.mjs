@@ -1,5 +1,9 @@
 import { defaultBaseUrl, defaultSessionPath } from "./config.mjs";
 
+const MULTI_VALUE_OPTIONS = new Set([
+  "file",
+]);
+
 export function parseArgs(argv) {
   const args = [...argv];
   let command = "";
@@ -23,19 +27,20 @@ export function parseArgs(argv) {
     }
 
     const [name, inlineValue] = token.slice(2).split("=", 2);
+    const optionKey = toCamelCase(name);
     if (inlineValue !== undefined) {
-      options[toCamelCase(name)] = inlineValue;
+      assignOption(options, optionKey, inlineValue);
       continue;
     }
 
     const next = args[index + 1];
     if (next && !next.startsWith("--")) {
-      options[toCamelCase(name)] = next;
+      assignOption(options, optionKey, next);
       index += 1;
       continue;
     }
 
-    options[toCamelCase(name)] = true;
+    assignOption(options, optionKey, true);
   }
 
   return { command, options, positionals };
@@ -59,4 +64,20 @@ export function isHelpToken(value) {
 
 function toCamelCase(value) {
   return value.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+}
+
+function assignOption(options, key, value) {
+  if (!MULTI_VALUE_OPTIONS.has(key)) {
+    options[key] = value;
+    return;
+  }
+
+  if (options[key] === undefined) {
+    options[key] = value;
+    return;
+  }
+
+  options[key] = Array.isArray(options[key])
+    ? [...options[key], value]
+    : [options[key], value];
 }

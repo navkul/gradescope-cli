@@ -14,6 +14,19 @@ test("parseCliArgs preserves explicit subcommands", () => {
   assert.equal(parsed.options.course, "123");
 });
 
+test("parseCliArgs keeps multiple submit files and submission-type options", () => {
+  const parsed = parseCliArgs(["submit", "./main.py", "./utils.py", "--submission-type", "upload"]);
+  assert.equal(parsed.command, "submit");
+  assert.deepEqual(parsed.positionals, ["./main.py", "./utils.py"]);
+  assert.equal(parsed.options.submissionType, "upload");
+});
+
+test("parseCliArgs preserves repeated --file values", () => {
+  const parsed = parseCliArgs(["submit", "--file", "./main.py", "--file", "./utils.py"]);
+  assert.equal(parsed.command, "submit");
+  assert.deepEqual(parsed.options.file, ["./main.py", "./utils.py"]);
+});
+
 test("parseCliArgs keeps the completion command positional shell", () => {
   const parsed = parseCliArgs(["completion", "bash"]);
   assert.equal(parsed.command, "completion");

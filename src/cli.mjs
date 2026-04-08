@@ -1,13 +1,22 @@
 import fs from "node:fs/promises";
 import { loadCredentials } from "./credentials.mjs";
-import { validateUploadPath } from "./path-utils.mjs";
+import { validateUploadPaths } from "./path-utils.mjs";
 import { renderCompletionScript, getCompletionSuggestions } from "./completion.mjs";
 import { commonOptions, firstPositional, parseArgs } from "./command-utils.mjs";
 import { resolveCourse } from "./lookup.mjs";
 import {
+  resolveSubmissionType,
+  normalizeStringList,
+  submissionTypeLabel,
+  SUBMISSION_TYPE_CHOICES,
+} from "./submission-options.mjs";
+import {
   login,
+  listGitHubBranches,
+  listGitHubRepositories,
   listAssignments,
   listCourses,
+  listSubmissionTypes,
   result,
   submit,
 } from "../playwright/core.mjs";
@@ -16,6 +25,7 @@ import {
   printCourses,
   printSubmissionResult,
   promptSelection,
+  promptUploadPaths,
 } from "./ui.mjs";
 
 export async function main(argv = process.argv.slice(2)) {
@@ -98,9 +108,6 @@ async function runAssignments(parsed) {
 
 async function runSubmit(parsed) {
   const options = commonOptions(parsed.options);
-  const fileArg = firstPositional(parsed, 0) || parsed.options.file;
-  const { absolutePath, displayPath } = await validateUploadPath(fileArg);
-
   await ensureSessionForInteractiveFlow(options, parsed.options);
 
   const courseHint = String(parsed.options.course || "").trim();
@@ -123,13 +130,40 @@ async function runSubmit(parsed) {
     assignmentHint = selectedAssignment.id || selectedAssignment.title;
   }
 
-  console.log(`submitting: ${displayPath}`);
-  const submission = await submit({
+  const requestedType = parsed.options.submissionType || parsed.options.type;
+  let submissionType = resolveSubmissionType({
+    submissionType: requestedType,
+    filePaths: collectUploadPathArgs(parsed),
+    repo: parsed.options.repo,
+    branch: parsed.options.branch,
+  });
+
+  if (!submissionType) {
+    submissionType = await promptForSubmissionType(options, courseId, assignmentHint);
+  }
+
+  const submitOptions = {
     ...options,
     courseId,
     assignment: assignmentHint,
-    filePath: absolutePath,
-  });
+    submissionType,
+  };
+
+  if (submissionType === "upload") {
+    const uploadPaths = await resolveUploadPathsForSubmit(parsed);
+    console.log(`submitting via ${submissionTypeLabel(submissionType)}: ${uploadPaths.map((item) => item.displayPath).join(", ")}`);
+    submitOptions.filePaths = uploadPaths.map((item) => item.absolutePath);
+  } else if (submissionType === "github") {
+    const repo = await resolveGitHubRepository(parsed, options, courseId, assignmentHint);
+    const branch = await resolveGitHubBranch(parsed, options, courseId, assignmentHint, repo);
+    console.log(`submitting via ${submissionTypeLabel(submissionType)}: ${repo} @ ${branch}`);
+    submitOptions.repo = repo;
+    submitOptions.branch = branch;
+  } else {
+    throw new Error(`unsupported submission type "${submissionType}"`);
+  }
+
+  const submission = await submit(submitOptions);
   printSubmissionResult(submission);
 }
 
@@ -157,12 +191,6 @@ async function runCompletion(parsed) {
 }
 
 async function runWizard(parsed) {
-  const options = commonOptions(parsed.options);
-  const fileArg = firstPositional(parsed, 0) || parsed.options.file;
-  if (!fileArg) {
-    throw new Error("missing file path; use `gradescope-cli submit <file>` or `gradescope-cli wizard <file>`");
-  }
-
   await runSubmit(parsed);
 }
 
@@ -218,6 +246,74 @@ function formatAssignment(assignment) {
   return assignment.title;
 }
 
+async function resolveUploadPathsForSubmit(parsed) {
+  const candidatePaths = collectUploadPathArgs(parsed);
+  if (candidatePaths.length > 0) {
+    return validateUploadPaths(candidatePaths);
+  }
+
+  const promptedPaths = await promptUploadPaths();
+  return validateUploadPaths(promptedPaths);
+}
+
+function collectUploadPathArgs(parsed) {
+  return normalizeStringList([
+    ...(parsed.positionals || []),
+    parsed.options.file,
+  ]);
+}
+
+async function promptForSubmissionType(options, courseId, assignmentHint) {
+  const availableTypes = await listSubmissionTypes({
+    ...options,
+    courseId,
+    assignment: assignmentHint,
+  }).catch(() => []);
+  const availableChoices = availableTypes.length > 0
+    ? SUBMISSION_TYPE_CHOICES.filter((choice) => availableTypes.includes(choice.key))
+    : SUBMISSION_TYPE_CHOICES;
+  const selectedType = await promptSelection("Choose a submission type:", availableChoices, (choice) => choice.label);
+  return selectedType.key;
+}
+
+async function resolveGitHubRepository(parsed, options, courseId, assignmentHint) {
+  const repo = String(parsed.options.repo || "").trim();
+  if (repo) {
+    return repo;
+  }
+
+  const repositories = await listGitHubRepositories({
+    ...options,
+    courseId,
+    assignment: assignmentHint,
+  });
+  const selectedRepo = await promptSelection("Choose a GitHub repository:", repositories, formatGitHubChoice);
+  return selectedRepo.value || selectedRepo.label;
+}
+
+async function resolveGitHubBranch(parsed, options, courseId, assignmentHint, repo) {
+  const branch = String(parsed.options.branch || "").trim();
+  if (branch) {
+    return branch;
+  }
+
+  const branches = await listGitHubBranches({
+    ...options,
+    courseId,
+    assignment: assignmentHint,
+    repo,
+  });
+  const selectedBranch = await promptSelection("Choose a GitHub branch:", branches, formatGitHubChoice);
+  return selectedBranch.value || selectedBranch.label;
+}
+
+function formatGitHubChoice(choice) {
+  if (choice.label && choice.value && choice.label !== choice.value) {
+    return `${choice.label} (${choice.value})`;
+  }
+  return choice.label || choice.value || "";
+}
+
 export function parseCliArgs(argv) {
   return parseArgs(argv);
 }
@@ -229,12 +325,13 @@ Usage:
   gradescope-cli login [--credentials-file creds.json]
   gradescope-cli classes
   gradescope-cli assignments [course-id-or-name-or-short]
-  gradescope-cli submit <file> [--course <course-id-or-name-or-short>] [--assignment <assignment-id-or-title>]
+  gradescope-cli submit [<file> ...] [--file <path>] [--submission-type <upload|github>] [--repo <repository>] [--branch <branch>] [--course <course-id-or-name-or-short>] [--assignment <assignment-id-or-title>]
   gradescope-cli result <submission-id-or-url>
   gradescope-cli completion <bash|zsh>
 
 Notes:
-  submit <file> is the simplest path. If --course or --assignment are omitted, the CLI prompts you.
+  submit accepts one or more upload files, or a GitHub repository plus branch.
+  If the submit mode is omitted, the CLI prompts for Upload or GitHub after you choose the assignment.
   Course matching accepts an exact ID, exact course name, or exact short name.
   Assignment matching accepts an exact ID or exact title case-insensitively.
   Relative file paths are resolved from your current working directory.

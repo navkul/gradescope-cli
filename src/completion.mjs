@@ -42,6 +42,9 @@ const COMMAND_OPTIONS = {
     "--course",
     "--assignment",
     "--file",
+    "--submission-type",
+    "--repo",
+    "--branch",
   ],
   result: [
     "--submission",
@@ -50,6 +53,9 @@ const COMMAND_OPTIONS = {
     "--course",
     "--assignment",
     "--file",
+    "--submission-type",
+    "--repo",
+    "--branch",
     "--credentials-file",
     "--email",
     "--password",
@@ -59,6 +65,9 @@ const COMMAND_OPTIONS = {
     "--course",
     "--assignment",
     "--file",
+    "--submission-type",
+    "--repo",
+    "--branch",
     "--credentials-file",
     "--email",
     "--password",
@@ -135,6 +144,10 @@ export async function getCompletionSuggestions(request, dependencies = {}) {
 
   if (previousWord === "--assignment") {
     return completeAssignmentSuggestions(parsed, currentWord, loadCourses, loadAssignments);
+  }
+
+  if (previousWord === "--submission-type") {
+    return filterSuggestions(["upload", "github"], currentWord);
   }
 
   if (shouldCompleteFiles({ command, parsed, previousWord, currentWord })) {
