@@ -119,23 +119,63 @@ export function printAssignments(assignments) {
 }
 
 export function printSubmissionResult(result) {
+  for (const line of formatSubmissionResultLines(result)) {
+    console.log(line);
+  }
+}
+
+export function formatSubmissionResultLines(result) {
+  const lines = [];
+
+  if (result.courseId || result.courseName) {
+    const label = result.courseName
+      ? `${result.courseId || "-"} | ${result.courseName}`
+      : result.courseId;
+    lines.push(`course: ${label}`);
+  }
+  if (result.assignmentId || result.assignmentTitle) {
+    const label = result.assignmentTitle
+      ? `${result.assignmentId || "-"} | ${result.assignmentTitle}`
+      : result.assignmentId;
+    lines.push(`assignment: ${label}`);
+  }
   if (result.submissionId) {
-    console.log(`submission: ${result.submissionId}`);
+    lines.push(`submission: ${result.submissionId}`);
   }
   if (result.url) {
-    console.log(`url: ${result.url}`);
+    lines.push(`url: ${result.url}`);
   }
   if (result.status) {
-    console.log(`status: ${result.status}`);
+    lines.push(`status: ${result.status}`);
+  }
+  if (result.processingStatus && result.processingStatus !== result.status) {
+    lines.push(`processing: ${result.processingStatus}`);
+  }
+  if (result.scoreDisplay) {
+    lines.push(`score: ${result.scoreDisplay}`);
+  }
+  if (result.lateness) {
+    lines.push(`lateness: ${result.lateness}`);
+  }
+  if (result.notice) {
+    lines.push(...formatSection("notice", result.notice));
   }
   if (result.response) {
-    console.log(`response: ${result.response}`);
-  } else {
-    console.log("response: none");
+    lines.push(...formatSection("response", result.response));
   }
   if (result.hasAutograder) {
-    console.log(`autograder: ${result.autograderMessage}`);
-  } else {
-    console.log("autograder: none");
+    lines.push(...formatSection("autograder", result.autograderMessage));
   }
+
+  return lines;
+}
+
+function formatSection(label, value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return [];
+  }
+
+  const body = text.split("\n").map((line) => `  ${line}`);
+  return [`${label}:`, ...body];
 }

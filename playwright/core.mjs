@@ -106,27 +106,40 @@ export async function listAssignments(options) {
 }
 
 export async function result(options) {
-  return withAuthenticatedPage(options, async ({ page, baseUrl }) => {
+  return withAuthenticatedPage(options, async ({ page, baseUrl, timeoutMs }) => {
     const reference = String(options.submission || "").trim();
-    if (!reference) {
-      throw new Error("missing submission reference");
+    let target = "";
+    let assignment = null;
+
+    if (reference) {
+      target = resolveSubmissionReference(reference);
+    } else {
+      const resolved = await resolveLatestSubmissionFromAssignment(page, baseUrl, options);
+      target = resolved.submissionUrl;
+      assignment = resolved.assignment;
     }
 
-    const target = resolveSubmissionReference(reference);
     await page.goto(new URL(target, baseUrl).toString(), { waitUntil: "domcontentloaded" });
     await waitForNetworkIdle(page);
 
     if (!page.url().includes("/submissions/")) {
-      throw new Error(`submission ${reference} did not resolve to a submission page`);
+      throw new Error(`submission ${reference || target} did not resolve to a submission page`);
     }
 
     const html = await page.content();
     const bodyText = normalizeWhitespace(await page.locator("body").innerText().catch(() => ""));
     if (!html.includes("AssignmentSubmissionViewer") && !bodyText.includes("Submission") && bodyText.toLowerCase().includes("page you were looking for doesn't exist")) {
-      throw new Error(`submission ${reference} was not found`);
+      throw new Error(`submission ${reference || target} was not found`);
     }
 
-    return extractSubmissionResultFromPage(page, page.url());
+    return await readSubmissionResult(page, {
+      ...options,
+      timeoutMs,
+      courseId: options.courseId,
+      courseName: options.courseName,
+      assignmentId: options.assignmentId || assignment?.id,
+      assignmentTitle: options.assignmentTitle || assignment?.title,
+    });
   });
 }
 
@@ -226,7 +239,14 @@ export async function submit(options) {
       throw new Error(`submit did not reach a submission page; final URL was ${page.url()}`);
     }
 
-    return extractSubmissionResultFromPage(page, page.url());
+    return await readSubmissionResult(page, {
+      ...options,
+      timeoutMs,
+      courseId,
+      courseName: options.courseName,
+      assignmentId: assignment.id,
+      assignmentTitle: assignment.title,
+    });
   });
 }
 
@@ -330,35 +350,47 @@ export async function extractAssignmentsFromCoursePage(page, courseId, baseUrl =
 
 export async function extractSubmissionResultFromPage(page, fallbackUrl) {
   const url = page.url() || fallbackUrl || "";
-  const result = {
+  let result = {
     submissionId: extractSubmissionId(url),
     url,
     status: "",
+    processingStatus: "",
+    notice: "",
     response: "",
+    responseKind: "",
     autograderMessage: "",
     hasAutograder: false,
+    courseId: extractCourseId(url),
+    courseName: "",
+    assignmentId: extractAssignmentId(url),
+    assignmentTitle: "",
+    submissionFormat: "",
+    gradesVisible: false,
+    score: "",
+    totalPoints: "",
+    scoreDisplay: "",
+    lateness: "",
+    questionResults: [],
+    autograderResults: [],
   };
 
   const reactProps = await page.locator('[data-react-class="AssignmentSubmissionViewer"]').first().getAttribute("data-react-props").catch(() => "");
   if (reactProps) {
     try {
-      const parsed = JSON.parse(reactProps);
-      if (parsed?.assignment_submission?.id) {
-        result.submissionId = String(parsed.assignment_submission.id);
-      }
-      if (parsed?.assignment_submission?.status) {
-        result.status = normalizeWhitespace(parsed.assignment_submission.status);
-      }
-      if (parsed?.paths?.submission_path) {
-        result.url = new URL(parsed.paths.submission_path, url).toString();
-      }
-      const alertText = normalizeWhitespace(firstNonEmpty(parsed?.alert, ...(parsed?.alerts || [])));
-      if (alertText) {
-        result.response = alertText;
-      }
+      result = {
+        ...result,
+        ...parseSubmissionReactProps(reactProps, { pageUrl: url }),
+      };
     } catch {
       // Ignore malformed embedded props and fall back to visible content.
     }
+  }
+
+  if (!result.courseName) {
+    result.courseName = normalizeWhitespace(await firstVisibleText(page, [
+      ".sidebar--subtitle",
+      ".sidebar--title-course + .sidebar--subtitle",
+    ]));
   }
 
   if (!result.status) {
@@ -368,9 +400,15 @@ export async function extractSubmissionResultFromPage(page, fallbackUrl) {
       "title",
     ]));
   }
+  if (!result.processingStatus) {
+    result.processingStatus = result.status;
+  }
 
   if (!result.response) {
     result.response = normalizeWhitespace(await findSectionText(page, "Response"));
+    if (result.response) {
+      result.responseKind = "feedback";
+    }
   }
   if (!result.response) {
     result.response = normalizeWhitespace(await firstVisibleText(page, [
@@ -378,24 +416,188 @@ export async function extractSubmissionResultFromPage(page, fallbackUrl) {
       ".submissionContent",
       ".submission",
     ]));
+    if (result.response) {
+      result.responseKind = "feedback";
+    }
   }
   if (result.response === result.status) {
     result.response = "";
+    result.responseKind = "";
   }
 
-  result.autograderMessage = normalizeWhitespace(firstNonEmpty(
-    await findSectionText(page, "Autograder"),
-    await findSectionText(page, "Autograder Output"),
-    await findSectionText(page, "Output"),
-    await firstVisibleText(page, [
-      ".autograderResults",
-      ".autograder-output",
-      ".autograderOutput",
-    ]),
-  ));
+  if (!result.autograderMessage) {
+    result.autograderMessage = normalizeWhitespace(firstNonEmpty(
+      await findSectionText(page, "Autograder"),
+      await findSectionText(page, "Autograder Output"),
+      await findSectionText(page, "Output"),
+      await firstVisibleText(page, [
+        ".autograderResults",
+        ".autograder-output",
+        ".autograderOutput",
+      ]),
+    ));
+  }
   result.hasAutograder = Boolean(result.autograderMessage);
 
   return result;
+}
+
+export function parseSubmissionReactProps(value, options = {}) {
+  const parsed = typeof value === "string" ? JSON.parse(value) : value;
+  const pageUrl = String(options.pageUrl || "").trim();
+  const gradesVisible = inferGradesVisible(parsed);
+  const questionResults = buildQuestionResults(parsed, gradesVisible);
+  const autograderResults = buildAutograderResults(parsed?.autograder_results);
+  const rawStatus = normalizeWhitespace(parsed?.assignment_submission?.status);
+  const score = normalizePointValue(parsed?.assignment_submission?.score);
+  const totalPoints = normalizePointValue(parsed?.assignment?.total_points);
+  const scoreDisplay = formatScoreDisplay(score, totalPoints);
+  const response = buildQuestionResponse(questionResults, gradesVisible);
+  if (shouldSuppressQuestionResponse(questionResults, autograderResults)) {
+    response.text = "";
+    response.kind = "";
+  }
+  const autograderMessage = buildAutograderMessage(parsed?.autograder_results, autograderResults);
+
+  return {
+    submissionId: formatId(parsed?.assignment_submission?.id),
+    url: absoluteUrlFromPath(pageUrl, parsed?.paths?.submission_path) || pageUrl,
+    status: deriveSubmissionStatus({
+      rawStatus,
+      gradesVisible,
+      scoreDisplay,
+      questionResults,
+      autograderResults,
+    }),
+    processingStatus: rawStatus,
+    notice: normalizeWhitespace(firstNonEmpty(parsed?.alert, ...(parsed?.alerts || []))),
+    response: response.text,
+    responseKind: response.kind,
+    autograderMessage,
+    hasAutograder: Boolean(autograderMessage),
+    courseId: extractCourseId(parsed?.paths?.course_path || pageUrl),
+    assignmentId: formatId(parsed?.assignment?.id) || extractAssignmentId(pageUrl),
+    assignmentTitle: normalizeWhitespace(parsed?.assignment?.title),
+    submissionFormat: normalizeWhitespace(parsed?.assignment?.submission_format),
+    gradesVisible: gradesVisible === true,
+    score,
+    totalPoints,
+    scoreDisplay,
+    lateness: normalizeWhitespace(parsed?.assignment_submission?.lateness_in_words),
+    questionResults,
+    autograderResults,
+  };
+}
+
+async function readSubmissionResult(page, options = {}) {
+  const timeoutMs = Number.parseInt(String(options.timeoutMs || DEFAULT_TIMEOUT_MS), 10) || DEFAULT_TIMEOUT_MS;
+  const waitForResponse = Boolean(options.waitForResponse);
+  let result = await extractSubmissionResultFromPage(page, page.url());
+
+  if (waitForResponse && !hasSubmissionResponse(result)) {
+    const timeoutAt = Date.now() + timeoutMs;
+
+    while (Date.now() < timeoutAt) {
+      await page.waitForTimeout(2000);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await waitForNetworkIdle(page);
+      result = await extractSubmissionResultFromPage(page, page.url());
+      if (hasSubmissionResponse(result)) {
+        break;
+      }
+    }
+  }
+
+  return attachSubmissionMetadata(result, options);
+}
+
+async function resolveLatestSubmissionFromAssignment(page, baseUrl, options) {
+  const courseId = String(options.courseId || "").trim();
+  if (!courseId) {
+    throw new Error("missing course ID");
+  }
+
+  const assignmentHint = String(options.assignment || "").trim();
+  if (!assignmentHint) {
+    throw new Error("missing assignment");
+  }
+
+  await page.goto(new URL(`/courses/${courseId}`, baseUrl).toString(), { waitUntil: "domcontentloaded" });
+  await waitForNetworkIdle(page);
+
+  const assignments = await extractAssignmentsFromCoursePage(page, courseId, baseUrl);
+  const assignment = resolveAssignment(assignments, assignmentHint);
+  if (!assignment) {
+    throw new Error(`could not find assignment ${assignmentHint} in course ${courseId}`);
+  }
+
+  if (assignment.submissionUrl) {
+    return {
+      assignment,
+      submissionUrl: assignment.submissionUrl,
+    };
+  }
+
+  if (assignment.url) {
+    await page.goto(assignment.url, { waitUntil: "domcontentloaded" });
+    await waitForNetworkIdle(page);
+
+    const submissionUrl = await findLatestSubmissionUrlOnPage(page, baseUrl);
+    if (submissionUrl) {
+      return {
+        assignment,
+        submissionUrl,
+      };
+    }
+  }
+
+  throw new Error(`assignment "${assignment.title}" does not have a submission result yet`);
+}
+
+async function findLatestSubmissionUrlOnPage(page, baseUrl) {
+  if (page.url().includes("/submissions/")) {
+    return page.url();
+  }
+
+  const links = await page.locator("a[href]").evaluateAll((elements) => {
+    return elements.map((element) => element.getAttribute("href") || "");
+  }).catch(() => []);
+
+  const submissionHref = links.find((href) => /\/courses\/\d+\/assignments\/\d+\/submissions\/\d+/.test(href)) || "";
+  if (!submissionHref) {
+    return "";
+  }
+
+  return new URL(submissionHref, baseUrl).toString();
+}
+
+function hasSubmissionResponse(result) {
+  if (result?.hasAutograder) {
+    return true;
+  }
+
+  if (result?.responseKind === "feedback") {
+    return true;
+  }
+
+  if (!result?.gradesVisible) {
+    return false;
+  }
+
+  return Boolean(
+    normalizeWhitespace(result?.scoreDisplay)
+      || result?.questionResults?.length,
+  );
+}
+
+function attachSubmissionMetadata(result, options = {}) {
+  return {
+    ...result,
+    courseId: String(options.courseId || result.courseId || "").trim(),
+    courseName: normalizeWhitespace(options.courseName || result.courseName || ""),
+    assignmentId: String(options.assignmentId || result.assignmentId || "").trim(),
+    assignmentTitle: normalizeWhitespace(options.assignmentTitle || result.assignmentTitle || ""),
+  };
 }
 
 export function resolveSubmissionReference(reference) {
@@ -410,6 +612,10 @@ export function extractAssignmentId(value) {
   return String(value || "").match(/\/assignments\/(\d+)/)?.[1] || "";
 }
 
+export function extractCourseId(value) {
+  return String(value || "").match(/\/courses\/(\d+)/)?.[1] || "";
+}
+
 export function extractSubmissionId(value) {
   return String(value || "").match(/\/submissions\/(\d+)/)?.[1] || "";
 }
@@ -420,6 +626,15 @@ export function normalizeWhitespace(value) {
 
 export function firstLine(value) {
   return String(value || "").split("\n").map(normalizeWhitespace).find(Boolean) || "";
+}
+
+export function normalizeMultilineText(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line, index, lines) => line.trim() || (index > 0 && index < lines.length - 1))
+    .join("\n")
+    .trim();
 }
 
 export function stripLeadingCourseShort(raw, short) {
@@ -434,6 +649,330 @@ export function stripLeadingCourseShort(raw, short) {
   }
 
   return normalizedRaw.slice(normalizedShort.length).replace(/^[-|:\s]+/, "").trim();
+}
+
+function inferGradesVisible(parsed) {
+  if (typeof parsed?.grades_visible === "boolean") {
+    return parsed.grades_visible;
+  }
+
+  if (normalizePointValue(parsed?.assignment_submission?.score)) {
+    return true;
+  }
+
+  if ((parsed?.question_submissions || []).some((submission) => normalizePointValue(submission?.score))) {
+    return true;
+  }
+
+  if ((parsed?.rubric_items || []).some((item) => item?.present)) {
+    return true;
+  }
+
+  if ((parsed?.autograder_results?.tests || []).length > 0) {
+    return true;
+  }
+
+  return null;
+}
+
+function buildQuestionResults(parsed, gradesVisible) {
+  const questions = Array.isArray(parsed?.questions) ? parsed.questions : [];
+  const submissions = Array.isArray(parsed?.question_submissions) ? parsed.question_submissions : [];
+  const rubricItems = Array.isArray(parsed?.rubric_items) ? parsed.rubric_items : [];
+  const submissionByQuestionId = new Map(submissions.map((submission) => [formatId(submission?.question_id), submission]));
+  const rubricByQuestionId = new Map();
+
+  for (const item of rubricItems) {
+    const questionId = formatId(item?.question_id);
+    if (!questionId) {
+      continue;
+    }
+    const existing = rubricByQuestionId.get(questionId) || [];
+    existing.push(item);
+    rubricByQuestionId.set(questionId, existing);
+  }
+
+  const questionIds = dedupeNonEmpty([
+    ...(parsed?.inorder_leaf_question_ids || []).map(formatId),
+    ...questions.map((question) => formatId(question?.id)),
+    ...submissions.map((submission) => formatId(submission?.question_id)),
+    ...rubricItems.map((item) => formatId(item?.question_id)),
+  ]);
+
+  return questionIds.map((questionId, index) => {
+    const question = questions.find((candidate) => formatId(candidate?.id) === questionId) || {};
+    const submission = submissionByQuestionId.get(questionId) || {};
+    const rubric = (rubricByQuestionId.get(questionId) || [])
+      .filter((item) => item?.present)
+      .map((item) => buildRubricItem(item));
+    const annotations = Array.isArray(submission?.annotations)
+      ? submission.annotations.map((annotation) => normalizeWhitespace(annotation?.content)).filter(Boolean)
+      : [];
+    const comments = Array.isArray(submission?.evaluations)
+      ? submission.evaluations.map((evaluation) => normalizeWhitespace(evaluation?.comments)).filter(Boolean)
+      : [];
+    const answers = extractAnswerLines(submission?.answers);
+    const score = gradesVisible === false ? "" : normalizePointValue(submission?.score);
+    const maxScore = gradesVisible === false ? "" : normalizePointValue(question?.weight);
+    const scoreDisplay = formatScoreDisplay(score, maxScore);
+
+    return {
+      questionId,
+      index: normalizeWhitespace(question?.full_index || question?.index || index + 1),
+      title: normalizeWhitespace(question?.title || `Question ${index + 1}`),
+      score,
+      maxScore,
+      scoreDisplay,
+      rubricItems: rubric,
+      annotations,
+      comments,
+      answers,
+    };
+  }).filter((item) => item.title || item.answers.length || item.rubricItems.length || item.annotations.length || item.scoreDisplay);
+}
+
+function buildRubricItem(item) {
+  const lines = String(item?.description || "")
+    .split(/\r?\n/)
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean);
+
+  return {
+    title: lines[0] || "",
+    details: lines.slice(1).map((line) => line.replace(/^[-*]\s*/, "")).filter(Boolean),
+    weight: normalizePointValue(item?.weight),
+  };
+}
+
+function extractAnswerLines(value) {
+  const values = [];
+
+  walkAnswerValues(value, values);
+  return dedupeNonEmpty(values.map((item) => normalizeWhitespace(item)));
+}
+
+function walkAnswerValues(value, values) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      walkAnswerValues(item, values);
+    }
+    return;
+  }
+
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value)) {
+      walkAnswerValues(item, values);
+    }
+    return;
+  }
+
+  const text = normalizeWhitespace(value);
+  if (text) {
+    values.push(text);
+  }
+}
+
+function buildQuestionResponse(questionResults, gradesVisible) {
+  const lines = [];
+  let kind = "";
+
+  for (const question of questionResults) {
+    const hasDetail = Boolean(
+      question.scoreDisplay
+        || question.answers.length
+        || question.rubricItems.length
+        || question.annotations.length
+        || question.comments.length,
+    );
+    if (!hasDetail) {
+      continue;
+    }
+
+    const header = [`${question.index}. ${question.title}`];
+    if (question.scoreDisplay) {
+      header.push(question.scoreDisplay);
+    }
+    lines.push(header.join(" | "));
+
+    if (!kind) {
+      kind = gradesVisible ? "feedback" : "submission";
+    }
+
+    for (const answer of question.answers) {
+      lines.push(`  answer: ${answer}`);
+    }
+
+    for (const item of question.rubricItems) {
+      const rubricParts = [item.title];
+      if (item.weight && item.weight !== "0") {
+        rubricParts.push(`${item.weight} pt`);
+      }
+      lines.push(`  rubric: ${rubricParts.filter(Boolean).join(" | ")}`);
+      for (const detail of item.details) {
+        lines.push(`    ${detail}`);
+      }
+    }
+
+    for (const comment of question.comments) {
+      lines.push(`  comment: ${comment}`);
+    }
+
+    for (const annotation of question.annotations) {
+      lines.push(`  annotation: ${annotation}`);
+    }
+  }
+
+  return {
+    text: lines.join("\n"),
+    kind,
+  };
+}
+
+function buildAutograderResults(rawAutograder) {
+  if (!rawAutograder || !Array.isArray(rawAutograder.tests)) {
+    return [];
+  }
+
+  return rawAutograder.tests.map((test, index) => {
+    const score = normalizePointValue(test?.score);
+    const maxScore = normalizePointValue(test?.max_score);
+
+    return {
+      index: index + 1,
+      name: normalizeWhitespace(test?.name || `Test ${index + 1}`),
+      score,
+      maxScore,
+      scoreDisplay: formatScoreDisplay(score, maxScore),
+      status: normalizeWhitespace(test?.status),
+      output: normalizeMultilineText(test?.output),
+    };
+  }).filter((test) => test.name || test.scoreDisplay || test.output || test.status);
+}
+
+function buildAutograderMessage(rawAutograder, autograderResults) {
+  const lines = [];
+
+  for (const test of autograderResults) {
+    const header = [test.name];
+    if (test.scoreDisplay) {
+      header.push(test.scoreDisplay);
+    } else if (test.status) {
+      header.push(test.status);
+    }
+    lines.push(header.filter(Boolean).join(" | "));
+
+    if (test.output) {
+      for (const line of test.output.split("\n")) {
+        lines.push(`  ${line}`);
+      }
+    }
+  }
+
+  const generalOutput = normalizeMultilineText(rawAutograder?.output);
+  if (generalOutput) {
+    lines.push("output:");
+    for (const line of generalOutput.split("\n")) {
+      lines.push(`  ${line}`);
+    }
+  }
+
+  const stdout = normalizeMultilineText(rawAutograder?.stdout);
+  if (stdout) {
+    lines.push("stdout:");
+    for (const line of stdout.split("\n")) {
+      lines.push(`  ${line}`);
+    }
+  }
+
+  const errorCode = normalizeWhitespace(rawAutograder?.error_code);
+  if (errorCode) {
+    lines.push(`error: ${errorCode}`);
+  }
+
+  return lines.join("\n");
+}
+
+function shouldSuppressQuestionResponse(questionResults, autograderResults) {
+  if (autograderResults.length === 0 || questionResults.length === 0) {
+    return false;
+  }
+
+  return questionResults.every((question) => (
+    normalizeWhitespace(question?.title).toLowerCase() === "autograder"
+      && !question.answers.length
+      && !question.rubricItems.length
+      && !question.annotations.length
+      && !question.comments.length
+  ));
+}
+
+function deriveSubmissionStatus({ rawStatus, gradesVisible, scoreDisplay, questionResults, autograderResults }) {
+  if (gradesVisible === false) {
+    return "ungraded";
+  }
+
+  if (scoreDisplay || questionResults.length || autograderResults.length) {
+    return "graded";
+  }
+
+  return rawStatus;
+}
+
+function absoluteUrlFromPath(pageUrl, relativePath) {
+  if (!pageUrl || !relativePath) {
+    return "";
+  }
+
+  return new URL(relativePath, pageUrl).toString();
+}
+
+function formatId(value) {
+  if (value === null || value === undefined || value === "") {
+    return "";
+  }
+  return String(value).trim();
+}
+
+function normalizePointValue(value) {
+  const text = normalizeWhitespace(value);
+  if (!text) {
+    return "";
+  }
+
+  const numeric = Number.parseFloat(text);
+  if (!Number.isFinite(numeric)) {
+    return text;
+  }
+
+  return Number.isInteger(numeric) ? String(numeric) : String(numeric);
+}
+
+function formatScoreDisplay(score, maxScore) {
+  if (!score) {
+    return "";
+  }
+
+  if (!maxScore) {
+    return score;
+  }
+
+  return `${score} / ${maxScore}`;
+}
+
+function dedupeNonEmpty(values) {
+  const seen = new Set();
+  const result = [];
+
+  for (const value of values) {
+    const normalized = normalizeWhitespace(value);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    result.push(normalized);
+  }
+
+  return result;
 }
 
 async function runWithBrowser(options, callback) {
