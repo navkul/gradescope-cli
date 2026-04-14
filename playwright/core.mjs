@@ -181,7 +181,6 @@ export async function submit(options) {
     if (!courseId) {
       throw new Error("missing course ID");
     }
-    const assignmentHint = String(options.assignment || "").trim();
     const submissionType = resolveSubmissionType({
       submissionType: options.submissionType,
       filePaths: options.filePaths || options.filePath,
@@ -612,7 +611,7 @@ export function extractAssignmentId(value) {
   return String(value || "").match(/\/assignments\/(\d+)/)?.[1] || "";
 }
 
-export function extractCourseId(value) {
+function extractCourseId(value) {
   return String(value || "").match(/\/courses\/(\d+)/)?.[1] || "";
 }
 
@@ -624,11 +623,11 @@ export function normalizeWhitespace(value) {
   return String(value || "").trim().split(/\s+/).filter(Boolean).join(" ");
 }
 
-export function firstLine(value) {
+function firstLine(value) {
   return String(value || "").split("\n").map(normalizeWhitespace).find(Boolean) || "";
 }
 
-export function normalizeMultilineText(value) {
+function normalizeMultilineText(value) {
   return String(value || "")
     .split(/\r?\n/)
     .map((line) => line.trimEnd())
@@ -1798,11 +1797,6 @@ async function findSectionText(page, headingText) {
   }
 
   return "";
-}
-
-function stripToAssignmentPath(href) {
-  const match = String(href || "").match(/(\/courses\/\d+\/assignments\/\d+)/);
-  return match?.[1] || href;
 }
 
 function firstNonEmpty(...values) {
