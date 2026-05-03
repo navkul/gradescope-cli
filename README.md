@@ -275,4 +275,4 @@ Browser-backed parser tests are skipped by default so `npm test` stays reliable 
 GRADESCOPE_RUN_BROWSER_TESTS=1 npm test
 ```
 
-The repo still contains the earlier Go implementation, but the public CLI and current primary path are now the Playwright-backed npm command.
+The earlier Go implementation has been removed. The maintained development and runtime path is the Playwright-backed npm command.
