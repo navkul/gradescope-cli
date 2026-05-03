@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
+import { performance } from "node:perf_hooks";
 import { loadCredentials } from "./credentials.mjs";
 import { validateUploadPaths } from "./path-utils.mjs";
-import { renderCompletionScript, getCompletionSuggestions } from "./completion.mjs";
 import { commonOptions, firstPositional, parseArgs } from "./command-utils.mjs";
+import { getBackend } from "./backend.mjs";
 import { resolveAssignment, resolveCourse } from "./lookup.mjs";
 import {
   resolveSubmissionType,
@@ -10,16 +11,6 @@ import {
   submissionTypeLabel,
   SUBMISSION_TYPE_CHOICES,
 } from "./submission-options.mjs";
-import {
-  login,
-  listGitHubBranches,
-  listGitHubRepositories,
-  listAssignments,
-  listCourses,
-  listSubmissionTypes,
-  result,
-  submit,
-} from "../playwright/core.mjs";
 import {
   printAssignments,
   printCourses,
@@ -29,11 +20,6 @@ import {
 } from "./ui.mjs";
 
 export async function main(argv = process.argv.slice(2)) {
-  if (argv[0] === "__complete") {
-    await runHiddenCompletion(argv.slice(1));
-    return;
-  }
-
   const parsed = parseArgs(argv);
   const command = parsed.command || "wizard";
 
@@ -53,9 +39,6 @@ export async function main(argv = process.argv.slice(2)) {
     case "result":
       await runResult(parsed);
       return;
-    case "completion":
-      await runCompletion(parsed);
-      return;
     case "wizard":
     case "run":
       await runWizard(parsed);
@@ -71,46 +54,57 @@ export async function main(argv = process.argv.slice(2)) {
 }
 
 async function runLogin(parsed) {
+  const timer = startTimer();
   const options = commonOptions(parsed.options);
+  const backend = getBackend("login", options);
   const credentials = await loadCredentials(parsed.options, { promptForMissing: true });
-  await login({
+  await backend.login({
     ...options,
     ...credentials,
   });
-  console.log(`logged in successfully; session saved to ${options.sessionFile}`);
+  console.log(`Login succeeded in ${formatElapsed(timer)}; session saved to ${options.sessionFile}`);
 }
 
 async function runClasses(parsed) {
+  const timer = startTimer();
   const options = commonOptions(parsed.options);
-  const courses = await listCourses(options);
+  const backend = getBackend("classes", options);
+  const courses = await backend.listCourses(options);
   printCourses(courses);
+  console.log(`Retrieved classes in ${formatElapsed(timer)}`);
 }
 
 async function runAssignments(parsed) {
+  const timer = startTimer();
   const options = commonOptions(parsed.options);
+  const backend = getBackend("assignments", options);
   const courseHint = firstPositional(parsed, 0) || String(parsed.options.course || "").trim();
   let courseId = "";
 
   if (!courseHint) {
-    const courses = await listCourses(options);
+    const courses = await backend.listCourses(options);
     const selectedCourse = await promptSelection("Choose a class:", courses, formatCourse);
     courseId = selectedCourse.id;
   } else {
-    courseId = await resolveCourseId(options, courseHint);
+    courseId = await resolveCourseId(backend, options, courseHint);
   }
 
-  const assignments = await listAssignments({
+  const assignments = await backend.listAssignments({
     ...options,
     courseId,
   });
   printAssignments(assignments);
+  console.log(`Retrieved assignments in ${formatElapsed(timer)}`);
 }
 
 async function runSubmit(parsed) {
+  const timer = startTimer();
   const options = commonOptions(parsed.options);
-  await ensureSessionForInteractiveFlow(options, parsed.options);
-  const course = await resolveCourseSelection(options, String(parsed.options.course || "").trim());
+  const backend = getBackend("submit", options);
+  await ensureSessionForInteractiveFlow(backend, options, parsed.options);
+  const course = await resolveCourseSelection(backend, options, String(parsed.options.course || "").trim());
   const assignment = await resolveAssignmentSelection(
+    backend,
     options,
     course.id,
     String(parsed.options.assignment || "").trim(),
@@ -126,7 +120,7 @@ async function runSubmit(parsed) {
   });
 
   if (!submissionType) {
-    submissionType = await promptForSubmissionType(options, course.id, assignmentHint);
+    submissionType = await promptForSubmissionType(backend, options, course.id, assignmentHint);
   }
 
   const submitOptions = {
@@ -145,8 +139,8 @@ async function runSubmit(parsed) {
     console.log(`submitting via ${submissionTypeLabel(submissionType)}: ${uploadPaths.map((item) => item.displayPath).join(", ")}`);
     submitOptions.filePaths = uploadPaths.map((item) => item.absolutePath);
   } else if (submissionType === "github") {
-    const repo = await resolveGitHubRepository(parsed, options, course.id, assignmentHint);
-    const branch = await resolveGitHubBranch(parsed, options, course.id, assignmentHint, repo);
+    const repo = await resolveGitHubRepository(backend, parsed, options, course.id, assignmentHint);
+    const branch = await resolveGitHubBranch(backend, parsed, options, course.id, assignmentHint, repo);
     console.log(`submitting via ${submissionTypeLabel(submissionType)}: ${repo} @ ${branch}`);
     submitOptions.repo = repo;
     submitOptions.branch = branch;
@@ -154,12 +148,15 @@ async function runSubmit(parsed) {
     throw new Error(`unsupported submission type "${submissionType}"`);
   }
 
-  const submission = await submit(submitOptions);
+  const submission = await backend.submit(submitOptions);
   printSubmissionResult(submission);
+  console.log(`Submitted in ${formatElapsed(timer)}`);
 }
 
 async function runResult(parsed) {
+  const timer = startTimer();
   const options = commonOptions(parsed.options);
+  const backend = getBackend("result", options);
   const submission = firstPositional(parsed, 0) || String(parsed.options.submission || "").trim();
   const courseHint = String(parsed.options.course || "").trim();
   const assignmentHint = String(parsed.options.assignment || "").trim();
@@ -168,7 +165,7 @@ async function runResult(parsed) {
     throw new Error("cannot combine a submission reference with --course or --assignment");
   }
 
-  await ensureSessionForInteractiveFlow(options, parsed.options);
+  await ensureSessionForInteractiveFlow(backend, options, parsed.options);
 
   const resultOptions = {
     ...options,
@@ -177,8 +174,8 @@ async function runResult(parsed) {
   if (submission) {
     resultOptions.submission = submission;
   } else {
-    const course = await resolveCourseSelection(options, courseHint);
-    const assignment = await resolveAssignmentSelection(options, course.id, assignmentHint);
+    const course = await resolveCourseSelection(backend, options, courseHint);
+    const assignment = await resolveAssignmentSelection(backend, options, course.id, assignmentHint);
     resultOptions.courseId = course.id;
     resultOptions.courseName = course.name;
     resultOptions.assignment = assignment.id || assignment.title;
@@ -186,35 +183,27 @@ async function runResult(parsed) {
     resultOptions.assignmentTitle = assignment.title;
   }
 
-  const submissionResult = await result(resultOptions);
+  const submissionResult = await backend.result(resultOptions);
   printSubmissionResult(submissionResult);
-}
-
-async function runCompletion(parsed) {
-  const shell = firstPositional(parsed, 0).toLowerCase();
-  if (!shell) {
-    throw new Error("missing shell name; use `gradescope-cli completion bash` or `gradescope-cli completion zsh`");
-  }
-
-  console.log(renderCompletionScript(shell));
+  console.log(`Retrieved result in ${formatElapsed(timer)}`);
 }
 
 async function runWizard(parsed) {
   await runSubmit(parsed);
 }
 
-async function ensureSessionForInteractiveFlow(options, rawOptions) {
+async function ensureSessionForInteractiveFlow(backend, options, rawOptions) {
   await fs.access(options.sessionFile).catch(async () => {
     const credentials = await loadCredentials(rawOptions, { promptForMissing: true });
-    await login({
+    await backend.login({
       ...options,
       ...credentials,
     });
   });
 }
 
-async function resolveCourseId(options, hint) {
-  const courses = await listCourses(options);
+async function resolveCourseId(backend, options, hint) {
+  const courses = await backend.listCourses(options);
   const course = resolveCourse(courses, hint);
   if (!course) {
     throw new Error(`could not find course "${hint}". Use the course ID, exact course name, or exact short name.`);
@@ -222,8 +211,8 @@ async function resolveCourseId(options, hint) {
   return course.id;
 }
 
-async function resolveCourseSelection(options, courseHint) {
-  const courses = await listCourses(options);
+async function resolveCourseSelection(backend, options, courseHint) {
+  const courses = await backend.listCourses(options);
   if (!courseHint) {
     return promptSelection("Choose a class:", courses, formatCourse);
   }
@@ -235,8 +224,8 @@ async function resolveCourseSelection(options, courseHint) {
   return course;
 }
 
-async function resolveAssignmentSelection(options, courseId, assignmentHint) {
-  const assignments = await listAssignments({
+async function resolveAssignmentSelection(backend, options, courseId, assignmentHint) {
+  const assignments = await backend.listAssignments({
     ...options,
     courseId,
   });
@@ -249,22 +238,6 @@ async function resolveAssignmentSelection(options, courseId, assignmentHint) {
     throw new Error(`could not find assignment "${assignmentHint}". Use the assignment ID or exact assignment title.`);
   }
   return assignment;
-}
-
-async function runHiddenCompletion(argv) {
-  const cword = Number.parseInt(String(argv[0] || ""), 10);
-  if (!Number.isFinite(cword)) {
-    return;
-  }
-
-  const suggestions = await getCompletionSuggestions({
-    cword,
-    words: argv.slice(1),
-  }).catch(() => []);
-
-  for (const suggestion of suggestions) {
-    console.log(suggestion);
-  }
 }
 
 function formatCourse(course) {
@@ -301,8 +274,8 @@ function collectUploadPathArgs(parsed) {
   ]);
 }
 
-async function promptForSubmissionType(options, courseId, assignmentHint) {
-  const availableTypes = await listSubmissionTypes({
+async function promptForSubmissionType(backend, options, courseId, assignmentHint) {
+  const availableTypes = await backend.listSubmissionTypes({
     ...options,
     courseId,
     assignment: assignmentHint,
@@ -314,13 +287,13 @@ async function promptForSubmissionType(options, courseId, assignmentHint) {
   return selectedType.key;
 }
 
-async function resolveGitHubRepository(parsed, options, courseId, assignmentHint) {
+async function resolveGitHubRepository(backend, parsed, options, courseId, assignmentHint) {
   const repo = String(parsed.options.repo || "").trim();
   if (repo) {
     return repo;
   }
 
-  const repositories = await listGitHubRepositories({
+  const repositories = await backend.listGitHubRepositories({
     ...options,
     courseId,
     assignment: assignmentHint,
@@ -329,13 +302,13 @@ async function resolveGitHubRepository(parsed, options, courseId, assignmentHint
   return selectedRepo.value || selectedRepo.label;
 }
 
-async function resolveGitHubBranch(parsed, options, courseId, assignmentHint, repo) {
+async function resolveGitHubBranch(backend, parsed, options, courseId, assignmentHint, repo) {
   const branch = String(parsed.options.branch || "").trim();
   if (branch) {
     return branch;
   }
 
-  const branches = await listGitHubBranches({
+  const branches = await backend.listGitHubBranches({
     ...options,
     courseId,
     assignment: assignmentHint,
@@ -360,12 +333,11 @@ function printHelp() {
   console.log(`gradescope-cli
 
 Usage:
-  gradescope-cli login [--credentials-file creds.json]
-  gradescope-cli classes
-  gradescope-cli assignments [course-id-or-name-or-short]
-  gradescope-cli submit [<file> ...] [--file <path>] [--submission-type <upload|github>] [--repo <repository>] [--branch <branch>] [--course <course-id-or-name-or-short>] [--assignment <assignment-id-or-title>] [--wait-for-response]
-  gradescope-cli result [<submission-id-or-url>] [--submission <submission-id-or-url>] [--course <course-id-or-name-or-short>] [--assignment <assignment-id-or-title>]
-  gradescope-cli completion <bash|zsh>
+  gradescope-cli login [--credentials-file creds.json] [--backend <http|playwright>]
+  gradescope-cli classes [--backend <http|playwright>]
+  gradescope-cli assignments [course-id-or-name-or-short] [--backend <http|playwright>]
+  gradescope-cli submit [<file> ...] [--file <path>] [--submission-type <upload|github>] [--repo <repository>] [--branch <branch>] [--course <course-id-or-name-or-short>] [--assignment <assignment-id-or-title>] [--wait-for-response] [--backend <http|playwright>]
+  gradescope-cli result [<submission-id-or-url>] [--submission <submission-id-or-url>] [--course <course-id-or-name-or-short>] [--assignment <assignment-id-or-title>] [--backend <http|playwright>]
 
 Notes:
   submit accepts one or more upload files, or a GitHub repository plus branch.
@@ -373,12 +345,22 @@ Notes:
   Course matching accepts an exact ID, exact course name, or exact short name.
   Assignment matching accepts an exact ID or exact title case-insensitively.
   Relative file paths are resolved from your current working directory.
+  The default backend is http for login/classes/assignments/result and playwright for submit.
 
 Environment:
   GRADESCOPE_EMAIL
   GRADESCOPE_PASSWORD
   GRADESCOPE_BASE_URL
+  GRADESCOPE_BACKEND
   GRADESCOPE_HEADLESS
   GRADESCOPE_CONFIG_DIR
   GRADESCOPE_SKIP_BROWSER_DOWNLOAD`);
+}
+
+function startTimer() {
+  return performance.now();
+}
+
+function formatElapsed(startedAt) {
+  return `${(performance.now() - startedAt).toFixed(1)} ms`;
 }

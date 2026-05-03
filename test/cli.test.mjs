@@ -27,12 +27,6 @@ test("parseCliArgs preserves repeated --file values", () => {
   assert.deepEqual(parsed.options.file, ["./main.py", "./utils.py"]);
 });
 
-test("parseCliArgs keeps the completion command positional shell", () => {
-  const parsed = parseCliArgs(["completion", "bash"]);
-  assert.equal(parsed.command, "completion");
-  assert.deepEqual(parsed.positionals, ["bash"]);
-});
-
 test("parseCliArgs accepts wait-for-response on submit", () => {
   const parsed = parseCliArgs(["submit", "--wait-for-response"]);
   assert.equal(parsed.command, "submit");
@@ -44,4 +38,10 @@ test("parseCliArgs accepts course and assignment flags on result", () => {
   assert.equal(parsed.command, "result");
   assert.equal(parsed.options.course, "CS101");
   assert.equal(parsed.options.assignment, "Homework 1");
+});
+
+test("parseCliArgs accepts explicit backend selection", () => {
+  const parsed = parseCliArgs(["classes", "--backend", "playwright"]);
+  assert.equal(parsed.command, "classes");
+  assert.equal(parsed.options.backend, "playwright");
 });

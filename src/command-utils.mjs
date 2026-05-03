@@ -51,6 +51,7 @@ export function commonOptions(options) {
     baseUrl: options.baseUrl || defaultBaseUrl(),
     sessionFile: options.sessionFile || defaultSessionPath(),
     headless: options.headful ? false : undefined,
+    backend: options.backend,
   };
 }
 
