@@ -32,3 +32,16 @@ test("parseCliArgs keeps the completion command positional shell", () => {
   assert.equal(parsed.command, "completion");
   assert.deepEqual(parsed.positionals, ["bash"]);
 });
+
+test("parseCliArgs accepts wait-for-response on submit", () => {
+  const parsed = parseCliArgs(["submit", "--wait-for-response"]);
+  assert.equal(parsed.command, "submit");
+  assert.equal(parsed.options.waitForResponse, true);
+});
+
+test("parseCliArgs accepts course and assignment flags on result", () => {
+  const parsed = parseCliArgs(["result", "--course", "CS101", "--assignment", "Homework 1"]);
+  assert.equal(parsed.command, "result");
+  assert.equal(parsed.options.course, "CS101");
+  assert.equal(parsed.options.assignment, "Homework 1");
+});

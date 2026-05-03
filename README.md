@@ -1,6 +1,6 @@
 # gradescope-cli
 
-`gradescope-cli` is a Playwright-first Gradescope CLI. It logs in through the real web app, lists classes and assignments, supports both upload and GitHub submission flows, and prints the resulting submission status and any autograder text it can find.
+`gradescope-cli` is a Playwright-first Gradescope CLI. It logs in through the real web app, lists classes and assignments, supports both upload and GitHub submission flows, and prints the resulting submission status plus any grading response or autograder text it can find.
 
 ## Install
 
@@ -50,7 +50,9 @@ gradescope-cli classes
 gradescope-cli assignments
 gradescope-cli submit
 gradescope-cli submit ./path/to/file1.py ./path/to/file2.py
+gradescope-cli submit --wait-for-response
 gradescope-cli submit --submission-type github --repo owner/project --branch main
+gradescope-cli result --course "Distributed Systems" --assignment "Project 1"
 gradescope-cli result /courses/<course>/assignments/<assignment>/submissions/<submission>
 ```
 
@@ -133,6 +135,7 @@ gradescope-cli submit
 gradescope-cli submit ./submission.pdf
 gradescope-cli submit ./main.py ./utils.py --course 123456 --assignment "Project 1"
 gradescope-cli submit --file ./main.py --file ./utils.py --course CS101 --assignment "Project 1"
+gradescope-cli submit --wait-for-response --course CS101 --assignment "Project 1" ./main.py ./utils.py
 gradescope-cli submit --submission-type github --repo owner/project --branch main --course 123456 --assignment 7891011
 gradescope-cli submit --submission-type github --course "Distributed Systems" --assignment "Project 1"
 ```
@@ -147,9 +150,10 @@ Behavior:
 - Interactive upload mode prompts for additional files until you enter a blank line.
 - GitHub submissions accept `--repo` and `--branch`, or they can be chosen interactively from the live Gradescope form.
 - The branch list is loaded only after the repository is selected, so the CLI selects the repo first and then fetches the branch choices.
+- `--wait-for-response` keeps polling the submission page for up to the normal command timeout and returns as soon as a grading response or autograder output appears.
 - Course matching accepts either an exact course ID, exact course name, or exact short name.
 - Assignment matching accepts either an exact assignment ID or an exact title case-insensitively.
-- After submission, the CLI prints the submission URL, status, response text, and autograder text if it is available.
+- After submission, the CLI prints the submission URL, status, grading response text, and autograder text if they are available.
 
 ### `gradescope-cli completion <bash|zsh>`
 
@@ -193,7 +197,7 @@ Completion behavior:
 - `--file` uses native shell file completion.
 - If no saved session is available, completion falls back gracefully to static command and option suggestions.
 
-### `gradescope-cli result <submission-id-or-url>`
+### `gradescope-cli result [submission-id-or-url]`
 
 Fetches and prints a submission result page.
 
@@ -201,9 +205,19 @@ Fetches and prints a submission result page.
 gradescope-cli result 399271099
 gradescope-cli result /courses/123/assignments/456/submissions/789
 gradescope-cli result https://www.gradescope.com/courses/123/assignments/456/submissions/789
+gradescope-cli result --course 123456 --assignment 7891011
+gradescope-cli result --course CS101 --assignment "Project 1"
 ```
 
 For the most reliable result lookup, prefer the full nested submission path. Some accounts cannot access bare `/submissions/<id>` routes.
+
+If you omit the submission reference, the CLI can now resolve the latest submission interactively:
+
+- `--course` accepts an exact course ID, exact course name, or exact short name
+- `--assignment` accepts an exact assignment ID or exact assignment title
+- if `--course` is omitted, the CLI prompts you to choose a class
+- if `--assignment` is omitted, the CLI prompts you to choose an assignment
+- the CLI then loads the latest visible submission result for that assignment
 
 ## Common options
 

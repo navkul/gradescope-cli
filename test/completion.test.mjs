@@ -46,6 +46,21 @@ test("completion resolves course hints before suggesting assignments", async () 
   assert.deepEqual(suggestions, ["Homework 1"]);
 });
 
+test("completion resolves result assignment hints the same way as submit", async () => {
+  const suggestions = await getCompletionSuggestions(
+    {
+      cword: 5,
+      words: ["gradescope-cli", "result", "--course", "cs101", "--assignment", "home"],
+    },
+    {
+      listCourses: async () => courses,
+      listAssignments: async () => assignments,
+    },
+  );
+
+  assert.deepEqual(suggestions, ["Homework 1"]);
+});
+
 test("completion returns a file sentinel for submit file positions", async () => {
   const suggestions = await getCompletionSuggestions({
     cword: 2,

@@ -45,9 +45,12 @@ const COMMAND_OPTIONS = {
     "--submission-type",
     "--repo",
     "--branch",
+    "--wait-for-response",
   ],
   result: [
     "--submission",
+    "--course",
+    "--assignment",
   ],
   wizard: [
     "--course",

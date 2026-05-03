@@ -3,7 +3,7 @@ import { loadCredentials } from "./credentials.mjs";
 import { validateUploadPaths } from "./path-utils.mjs";
 import { renderCompletionScript, getCompletionSuggestions } from "./completion.mjs";
 import { commonOptions, firstPositional, parseArgs } from "./command-utils.mjs";
-import { resolveCourse } from "./lookup.mjs";
+import { resolveAssignment, resolveCourse } from "./lookup.mjs";
 import {
   resolveSubmissionType,
   normalizeStringList,
@@ -109,26 +109,13 @@ async function runAssignments(parsed) {
 async function runSubmit(parsed) {
   const options = commonOptions(parsed.options);
   await ensureSessionForInteractiveFlow(options, parsed.options);
-
-  const courseHint = String(parsed.options.course || "").trim();
-  let courseId = "";
-  if (!courseHint) {
-    const courses = await listCourses(options);
-    const selectedCourse = await promptSelection("Choose a class:", courses, formatCourse);
-    courseId = selectedCourse.id;
-  } else {
-    courseId = await resolveCourseId(options, courseHint);
-  }
-
-  let assignmentHint = String(parsed.options.assignment || "").trim();
-  if (!assignmentHint) {
-    const assignments = await listAssignments({
-      ...options,
-      courseId,
-    });
-    const selectedAssignment = await promptSelection("Choose an assignment:", assignments, formatAssignment);
-    assignmentHint = selectedAssignment.id || selectedAssignment.title;
-  }
+  const course = await resolveCourseSelection(options, String(parsed.options.course || "").trim());
+  const assignment = await resolveAssignmentSelection(
+    options,
+    course.id,
+    String(parsed.options.assignment || "").trim(),
+  );
+  const assignmentHint = assignment.id || assignment.title;
 
   const requestedType = parsed.options.submissionType || parsed.options.type;
   let submissionType = resolveSubmissionType({
@@ -139,14 +126,18 @@ async function runSubmit(parsed) {
   });
 
   if (!submissionType) {
-    submissionType = await promptForSubmissionType(options, courseId, assignmentHint);
+    submissionType = await promptForSubmissionType(options, course.id, assignmentHint);
   }
 
   const submitOptions = {
     ...options,
-    courseId,
+    courseId: course.id,
+    courseName: course.name,
     assignment: assignmentHint,
+    assignmentId: assignment.id,
+    assignmentTitle: assignment.title,
     submissionType,
+    waitForResponse: Boolean(parsed.options.waitForResponse),
   };
 
   if (submissionType === "upload") {
@@ -154,8 +145,8 @@ async function runSubmit(parsed) {
     console.log(`submitting via ${submissionTypeLabel(submissionType)}: ${uploadPaths.map((item) => item.displayPath).join(", ")}`);
     submitOptions.filePaths = uploadPaths.map((item) => item.absolutePath);
   } else if (submissionType === "github") {
-    const repo = await resolveGitHubRepository(parsed, options, courseId, assignmentHint);
-    const branch = await resolveGitHubBranch(parsed, options, courseId, assignmentHint, repo);
+    const repo = await resolveGitHubRepository(parsed, options, course.id, assignmentHint);
+    const branch = await resolveGitHubBranch(parsed, options, course.id, assignmentHint, repo);
     console.log(`submitting via ${submissionTypeLabel(submissionType)}: ${repo} @ ${branch}`);
     submitOptions.repo = repo;
     submitOptions.branch = branch;
@@ -170,14 +161,32 @@ async function runSubmit(parsed) {
 async function runResult(parsed) {
   const options = commonOptions(parsed.options);
   const submission = firstPositional(parsed, 0) || String(parsed.options.submission || "").trim();
-  if (!submission) {
-    throw new Error("missing submission reference");
+  const courseHint = String(parsed.options.course || "").trim();
+  const assignmentHint = String(parsed.options.assignment || "").trim();
+
+  if (submission && (courseHint || assignmentHint)) {
+    throw new Error("cannot combine a submission reference with --course or --assignment");
   }
 
-  const submissionResult = await result({
+  await ensureSessionForInteractiveFlow(options, parsed.options);
+
+  const resultOptions = {
     ...options,
-    submission,
-  });
+  };
+
+  if (submission) {
+    resultOptions.submission = submission;
+  } else {
+    const course = await resolveCourseSelection(options, courseHint);
+    const assignment = await resolveAssignmentSelection(options, course.id, assignmentHint);
+    resultOptions.courseId = course.id;
+    resultOptions.courseName = course.name;
+    resultOptions.assignment = assignment.id || assignment.title;
+    resultOptions.assignmentId = assignment.id;
+    resultOptions.assignmentTitle = assignment.title;
+  }
+
+  const submissionResult = await result(resultOptions);
   printSubmissionResult(submissionResult);
 }
 
@@ -211,6 +220,35 @@ async function resolveCourseId(options, hint) {
     throw new Error(`could not find course "${hint}". Use the course ID, exact course name, or exact short name.`);
   }
   return course.id;
+}
+
+async function resolveCourseSelection(options, courseHint) {
+  const courses = await listCourses(options);
+  if (!courseHint) {
+    return promptSelection("Choose a class:", courses, formatCourse);
+  }
+
+  const course = resolveCourse(courses, courseHint);
+  if (!course) {
+    throw new Error(`could not find course "${courseHint}". Use the course ID, exact course name, or exact short name.`);
+  }
+  return course;
+}
+
+async function resolveAssignmentSelection(options, courseId, assignmentHint) {
+  const assignments = await listAssignments({
+    ...options,
+    courseId,
+  });
+  if (!assignmentHint) {
+    return promptSelection("Choose an assignment:", assignments, formatAssignment);
+  }
+
+  const assignment = resolveAssignment(assignments, assignmentHint);
+  if (!assignment) {
+    throw new Error(`could not find assignment "${assignmentHint}". Use the assignment ID or exact assignment title.`);
+  }
+  return assignment;
 }
 
 async function runHiddenCompletion(argv) {
@@ -325,8 +363,8 @@ Usage:
   gradescope-cli login [--credentials-file creds.json]
   gradescope-cli classes
   gradescope-cli assignments [course-id-or-name-or-short]
-  gradescope-cli submit [<file> ...] [--file <path>] [--submission-type <upload|github>] [--repo <repository>] [--branch <branch>] [--course <course-id-or-name-or-short>] [--assignment <assignment-id-or-title>]
-  gradescope-cli result <submission-id-or-url>
+  gradescope-cli submit [<file> ...] [--file <path>] [--submission-type <upload|github>] [--repo <repository>] [--branch <branch>] [--course <course-id-or-name-or-short>] [--assignment <assignment-id-or-title>] [--wait-for-response]
+  gradescope-cli result [<submission-id-or-url>] [--submission <submission-id-or-url>] [--course <course-id-or-name-or-short>] [--assignment <assignment-id-or-title>]
   gradescope-cli completion <bash|zsh>
 
 Notes:

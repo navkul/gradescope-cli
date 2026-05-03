@@ -80,7 +80,7 @@ test("extractAssignmentsFromCoursePage keeps rows even when no assignment id is 
   });
 });
 
-test("extractSubmissionResultFromPage reads react props and autograder text", async (t) => {
+test("extractSubmissionResultFromPage reads notice, response, and autograder text", async (t) => {
   if (!browserCapability.available) {
     t.skip(browserCapability.reason);
     return;
@@ -90,8 +90,10 @@ test("extractSubmissionResultFromPage reads react props and autograder text", as
       <body>
         <div
           data-react-class="AssignmentSubmissionViewer"
-          data-react-props='{"assignment_submission":{"id":321,"status":"processed"},"paths":{"submission_path":"/courses/1/assignments/2/submissions/321"}}'
+          data-react-props='{"assignment_submission":{"id":321,"status":"processed"},"paths":{"submission_path":"/courses/1/assignments/2/submissions/321"},"alert":"Submission received"}'
         ></div>
+        <h2>Response</h2>
+        <div>Passed all hidden tests.</div>
         <h2>Autograder Output</h2>
         <div>Queued for grading</div>
       </body>
@@ -102,8 +104,12 @@ test("extractSubmissionResultFromPage reads react props and autograder text", as
       "https://www.gradescope.com/courses/1/assignments/2/submissions/321",
     );
     assert.equal(submission.submissionId, "321");
+    assert.equal(submission.courseId, "1");
+    assert.equal(submission.assignmentId, "2");
     assert.equal(submission.status, "processed");
     assert.equal(submission.url, "https://www.gradescope.com/courses/1/assignments/2/submissions/321");
+    assert.equal(submission.notice, "Submission received");
+    assert.equal(submission.response, "Passed all hidden tests.");
     assert.equal(submission.autograderMessage, "Queued for grading");
     assert.equal(submission.hasAutograder, true);
   });
