@@ -1,7 +1,7 @@
 {
   "name": "gradescope-playwright-cli",
   "version": "0.2.1",
-  "description": "A Playwright-first Gradescope CLI for login, browsing courses, and submitting files.",
+  "description": "A Gradescope CLI with fast HTTP commands and Playwright fallback support.",
   "type": "module",
   "bin": {
     "gradescope-cli": "./bin/gradescope-cli.mjs"
@@ -16,12 +16,13 @@
   "scripts": {
     "postinstall": "node ./scripts/postinstall.mjs",
     "test": "node --test",
-    "check": "node --check ./bin/gradescope-cli.mjs && node --check ./src/cli.mjs && node --check ./src/command-utils.mjs && node --check ./src/completion.mjs && node --check ./src/lookup.mjs && node --check ./src/path-utils.mjs && node --check ./src/submission-options.mjs && node --check ./playwright/core.mjs"
+    "check": "node --check ./bin/gradescope-cli.mjs && node --check ./src/backend.mjs && node --check ./src/cli.mjs && node --check ./src/command-utils.mjs && node --check ./src/completion.mjs && node --check ./src/http-client.mjs && node --check ./src/http-core.mjs && node --check ./src/lookup.mjs && node --check ./src/parsers.mjs && node --check ./src/path-utils.mjs && node --check ./src/submission-options.mjs && node --check ./playwright/core.mjs"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "cheerio": "1.0.0",
     "playwright": "1.58.2"
   }
 }
